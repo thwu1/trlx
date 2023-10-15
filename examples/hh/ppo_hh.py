@@ -30,6 +30,7 @@ default_config = TRLConfig(
         epochs=10000,
         total_steps=10000,
         batch_size=4,
+        eval_batch_size=32,
         checkpoint_interval=10000,
         eval_interval=500,
         pipeline="PromptPipeline",

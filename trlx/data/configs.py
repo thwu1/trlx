@@ -202,6 +202,7 @@ class TrainConfig:
     seq_length: int
     epochs: int
     batch_size: int
+    eval_batch_size: int
 
     checkpoint_interval: int
     eval_interval: int

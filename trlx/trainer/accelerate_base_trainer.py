@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 import ray
 import torch
+import math
 from accelerate import Accelerator  # type: ignore
 from ray.air import session
 from rich.console import Console
@@ -32,6 +33,7 @@ from trlx.utils.modeling import (
     freeze_bottom_causal_layers,
     freeze_bottom_seq2seq_layers,
     gather_dict,
+    logprobs_of_labels,
 )
 
 logger = logging.get_logger(__name__)
@@ -410,6 +412,37 @@ class AccelerateRLTrainer(BaseRLTrainer):
             stats["time/generate"] = time() - generate_time
 
             if self.accelerator.is_main_process:
+                # compute kl divergence
+                logger.info("Computing KL divergence")
+                kl_per_sample = []
+                tokens_num = []
+                device = self.model.device
+                with torch.no_grad():
+                    for i_batch in range(math.ceil(len(all_samples) / self.config.train.batch_size)):
+                        start = i_batch * self.config.train.batch_size
+                        end = min((i_batch + 1) * self.config.train.batch_size, len(all_samples))
+                        batch_samples = list(map(torch.LongTensor, all_samples[start:end]))
+                        batch_samples = torch.vstack(batch_samples).to(device)
+                        batch_prompt_size = all_prompt_sizes[start]
+                        assert all(batch_prompt_size == x for x in all_prompt_sizes[start:end])  # config.train.batch_size must devide config.train.eval_batch_size
+                        batch_masks = batch_samples.not_equal(self.tokenizer.pad_token_id).long().to(device)
+
+                        logits = self.model(batch_samples, batch_masks, return_dict=True).logits
+                        ref_logits = self.model.forward_hydra(
+                            batch_samples,
+                            attention_mask=batch_masks,
+                            return_dict=True,
+                        ).logits
+                        logprobs = logprobs_of_labels(logits[:, :-1, :], batch_samples[:, 1:])[:, batch_prompt_size - 1 :] * batch_masks[:, batch_prompt_size - 1 : -1]
+                        ref_logprobs = logprobs_of_labels(ref_logits[:, :-1, :], batch_samples[:, 1:])[:, batch_prompt_size - 1 :] * batch_masks[:, batch_prompt_size - 1 : -1]
+                        logratio = logprobs - ref_logprobs
+                        kl_per_sample.extend(logratio.sum(dim=-1).tolist())
+                        tokens_num.extend(batch_masks[:, batch_prompt_size - 1 : -1].sum(dim=-1).tolist())
+                    stats[f"kl_divergence/per_sample{sweep_suffix}"] = sum(kl_per_sample) / len(kl_per_sample)
+                    stats[f"kl_divergence/per_token{sweep_suffix}"] = sum(kl_per_sample) / sum(tokens_num)
+                    stats[f"token_num{sweep_suffix}"] = sum(tokens_num) / len(tokens_num)
+
+                # decode samples
                 str_samples, str_prompts, str_outputs = self.decode(all_prompts, all_samples, all_prompt_sizes)
 
                 columns = ["prompt", "output"]
