@@ -7,6 +7,7 @@ from trlx.data.default_configs import (
     default_ilql_config,
     default_ppo_config,
     default_sft_config,
+    default_p3o_config,
 )
 from trlx.utils import set_seed
 from trlx.utils.loading import get_pipeline, get_trainer
