@@ -1,0 +1,250 @@
+import json
+import math
+import os
+import sys
+from itertools import islice
+
+import numpy as np
+import torch
+import tritonclient.grpc as client_util
+from datasets import load_dataset
+from huggingface_hub import snapshot_download
+from torch import nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from tritonclient.utils import np_to_triton_dtype
+
+import trlx
+from trlx.data.default_configs import (
+    ModelConfig,
+    OptimizerConfig,
+    PPOConfig,
+    SchedulerConfig,
+    TokenizerConfig,
+    TrainConfig,
+    TRLConfig,
+)
+
+default_config = TRLConfig(
+    train=TrainConfig(
+        seq_length=1024,
+        epochs=10000,
+        total_steps=10000,
+        batch_size=4,
+        eval_batch_size=32,
+        checkpoint_interval=10000,
+        eval_interval=500,
+        pipeline="PromptPipeline",
+        trainer="AcceleratePPOTrainer",
+        checkpoint_dir="checkpoints/ppo_hh",
+    ),
+    model=ModelConfig(model_path="openchat/openchat_3.5", num_layers_unfrozen=2),
+    tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
+    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=8e-6, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
+    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=8e-6)),
+    method=PPOConfig(
+        name="PPOConfig",
+        num_rollouts=64,
+        chunk_size=16,
+        ppo_epochs=4,
+        init_kl_coef=0.05,
+        target=6,
+        horizon=10000,
+        gamma=1,
+        lam=0.95,
+        cliprange=0.2,
+        cliprange_value=0.2,
+        vf_coef=1,
+        scale_reward="running",
+        ref_mean=None,
+        ref_std=None,
+        cliprange_reward=10,
+        gen_kwargs=dict(
+            max_new_tokens=4096,
+            top_k=0,
+            top_p=1.0,
+            do_sample=True,
+        ),
+    ),
+)
+
+# TODO: test the reward model
+# implement reward template, need to substitute the special tokens with the reward template when evaluate
+# the reward model should get sample
+# dataset template
+# implement the policy template, figure out padding
+
+
+def prepare_tensor(name: str, input):
+    t = client_util.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
+    t.set_data_from_numpy(input)
+    return t
+
+
+def create_reward_fn():  # noqa:  C901
+    class GPTRewardModel(nn.Module):
+        def __init__(self, model_path, eos_token_id, alpha):
+            super().__init__()
+            if "mistral" in model_path or "Llama" in model_path:
+                model = AutoModelForCausalLM.from_pretrained(model_path)
+                self.transformer = model.model
+            else:
+                model = AutoModelForCausalLM.from_pretrained(model_path)
+                self.transformer = model.gpt_neox
+            self.config = model.config
+            # `gpt-neo(x)` models use `hidden_size` attribute names instead of `n_embd``
+            self.config.n_embd = self.config.hidden_size if hasattr(self.config, "hidden_size") else self.config.n_embd
+            self.model = model
+            # self.transformer = model.model
+            self.alpha = alpha
+            self.v_head = nn.Linear(self.config.n_embd, 1, bias=False)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            print(self.tokenizer.eos_token)
+            self.tokenizer.eos_token_id = eos_token_id
+            self.tokenizer.pad_token = self.tokenizer.unk_token
+            self.PAD_ID = self.tokenizer(self.tokenizer.pad_token)["input_ids"][0]
+            self.K = 7
+
+        def get_device(self):
+            return self.model.device
+
+        def gradient_checkpointing_enable(self):
+            self.model.gradient_checkpointing_enable()
+            return
+
+        def forward(
+            self,
+            input_ids=None,
+            past_key_values=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            mc_token_ids=None,
+            labels=None,
+            return_dict=False,
+            output_attentions=False,
+            output_hidden_states=False,
+            inference=False,
+        ):
+            # Split the inputs and rewards into two parts, chosen and rejected
+            print(input_ids)
+            bs = input_ids.shape[0]
+            transformer_outputs = self.transformer(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                # token_type_ids=token_type_ids,
+                position_ids=position_ids,
+            )
+            hidden_states = transformer_outputs[0]
+            scores = []
+            rewards = self.v_head(hidden_states).squeeze(-1)
+            for i in range(bs):
+                c_inds = (input_ids[i] == self.PAD_ID).nonzero()
+                c_ind = c_inds[0].item() if len(c_inds) > 0 else input_ids.shape[1]
+                scores.append(rewards[i, c_ind - 1])
+            scores = torch.stack(scores)
+            assert scores.shape == torch.Size([bs])
+            return scores
+
+    reward_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+    reward_model = GPTRewardModel("meta-llama/Llama-2-7b-chat-hf", reward_tokenizer.eos_token_id, 0.5)
+    # reward_tokenizer.pad_token = reward_tokenizer.eos_token
+    reward_tokenizer = reward_model.tokenizer
+    print(reward_tokenizer.pad_token)
+    reward_tokenizer.truncation_side = "left"
+
+    directory = snapshot_download("banghua/n_rm")
+    for fpath in os.listdir(directory):
+        if fpath.endswith(".pt") or fpath.endswith(".bin"):
+            checkpoint = os.path.join(directory, fpath)
+            break
+
+    reward_model.load_state_dict(torch.load(checkpoint), strict=False)
+    reward_model.eval()
+    reward_model.requires_grad_(False)
+    reward_device = torch.cuda.device_count() - 1
+    reward_model = reward_model.half().to(reward_device)
+    reward_batch_size = 24
+
+    def get_reward(samples):
+        input_ids = []
+        attention_masks = []
+        encodings_dict = reward_tokenizer(
+            samples,
+            truncation=True,
+            max_length=4096,
+            padding="max_length",
+            return_tensors="pt",
+        ).to(reward_device)
+        input_ids.append(encodings_dict["input_ids"])
+        attention_masks.append(encodings_dict["attention_mask"])
+        return reward_model(input_ids=torch.cat(input_ids), attention_mask=torch.cat(attention_masks))
+
+        mbs = reward_batch_size
+        out = []
+        for i in range(math.ceil(len(samples) / mbs)):
+            batch_ixs = slice(i * mbs, (i + 1) * mbs)
+            rewards = reward_model(input_ids=input_ids[batch_ixs], attention_masks=attention_masks[batch_ixs])
+            out.extend(rewards)
+        return torch.hstack(out)
+
+    def from_openchat_to_llama(str_sample):
+        str_sample.strip()
+        if str_sample.startswith("<s>"):
+            str_sample = str_sample[len("<s>") :].strip()
+        assert str_sample.startswith("GPT4 Correct User: ")
+        str = str_sample.replace("<|end_of_turn|>GPT4 Correct User: ", "</s> [INST] ")
+        str = str.replace("<|end_of_turn|>GPT4 Correct Assistant: ", " [/INST] ")
+        str = "[INST]" + str[len("GPT4 Correct User:") :]
+        str = str.replace("<|end_of_turn|>", "</s>")
+        return str
+
+    def reward_fn(samples, prompts, **kwargs):
+        samples = [from_openchat_to_llama(s) for s in samples]
+        rewards = get_reward(samples)
+        return rewards
+
+    return reward_fn
+
+
+def main(hparams={}):
+    config = TRLConfig.update(default_config, hparams)
+
+    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train")
+    dataset = dataset.train_test_split(test_size=0.1, seed=42)
+
+    def apply_openchat_format_from_list(sample):
+        str = ""
+        for i, content in enumerate(sample["conversations"]):
+            if i % 2 == 0:
+                str += "GPT4 Correct User: " + content + "<|end_of_turn|>"
+            else:
+                str += "GPT4 Correct Assistant: " + content + "<|end_of_turn|>"
+        str += "GPT4 Correct Assistant:"
+        return {"prompt": str}
+
+    dataset = dataset.map(apply_openchat_format_from_list)
+
+    prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
+    eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 280)]
+
+    test_format_samples = [{"conversations": ["Hello"]}, {"conversations": ["Hello", "Hi", "How are you today?"]}]
+    reward_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+    reward_tokenizer.pad_token = reward_tokenizer.unk_token
+
+    reward_fn = create_reward_fn()
+
+    trlx.train(
+        prompts=prompts,
+        eval_prompts=eval_prompts,
+        reward_fn=reward_fn,
+        config=config,
+        stop_sequences=["Human:", "human:", "Assistant:", "assistant:"],
+    )
+
+
+if __name__ == "__main__":
+    hparams = {} if len(sys.argv) == 1 else json.loads(sys.argv[1])
+    main(hparams)
