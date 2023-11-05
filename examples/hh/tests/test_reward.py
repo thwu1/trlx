@@ -1,0 +1,235 @@
+import json
+import math
+import os
+import sys
+import torch
+from datasets import load_dataset
+from huggingface_hub import snapshot_download
+from torch import nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# os.environ["HOME"] = "/scratch/banghua"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4,5,7"
+access_token = "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"
+
+
+def create_reward_fn():  # noqa:  C901
+    class GPTRewardModel(nn.Module):
+        def __init__(self, model_path, eos_token_id, alpha):
+            super().__init__()
+            if "mistral" in model_path or "Llama" in model_path:
+                model = AutoModelForCausalLM.from_pretrained(model_path, token=access_token)
+                self.transformer = model.model
+            else:
+                model = AutoModelForCausalLM.from_pretrained(model_path)
+                self.transformer = model.gpt_neox
+            self.config = model.config
+            # `gpt-neo(x)` models use `hidden_size` attribute names instead of `n_embd``
+            self.config.n_embd = self.config.hidden_size if hasattr(self.config, "hidden_size") else self.config.n_embd
+            self.model = model
+            # self.transformer = model.model
+            self.alpha = alpha
+            self.v_head = nn.Linear(self.config.n_embd, 1, bias=False)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            print(self.tokenizer.eos_token)
+            self.tokenizer.eos_token_id = eos_token_id
+            self.tokenizer.pad_token = self.tokenizer.unk_token
+            self.PAD_ID = self.tokenizer(self.tokenizer.pad_token)["input_ids"][0]
+            self.K = 7
+
+        def get_device(self):
+            return self.model.device
+
+        def gradient_checkpointing_enable(self):
+            self.model.gradient_checkpointing_enable()
+            return
+
+        def forward(
+            self,
+            input_ids=None,
+            past_key_values=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            mc_token_ids=None,
+            labels=None,
+            return_dict=False,
+            output_attentions=False,
+            output_hidden_states=False,
+            inference=False,
+        ):
+            # Split the inputs and rewards into two parts, chosen and rejected
+            print(input_ids)
+            bs = input_ids.shape[0]
+            transformer_outputs = self.transformer(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                # token_type_ids=token_type_ids,
+                position_ids=position_ids,
+            )
+            hidden_states = transformer_outputs[0]
+            scores = []
+            rewards = self.v_head(hidden_states).squeeze(-1)
+            for i in range(bs):
+                c_inds = (input_ids[i] == self.PAD_ID).nonzero()
+                c_ind = c_inds[0].item() if len(c_inds) > 0 else input_ids.shape[1]
+                scores.append(rewards[i, c_ind - 1])
+            scores = torch.stack(scores)
+            assert scores.shape == torch.Size([bs])
+            return scores
+
+    reward_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf", token=access_token)
+    reward_model = GPTRewardModel("meta-llama/Llama-2-7b-chat-hf", reward_tokenizer.eos_token_id, 0.5)
+    # reward_tokenizer.pad_token = reward_tokenizer.eos_token
+    reward_tokenizer = reward_model.tokenizer
+    print(reward_tokenizer.pad_token)
+    reward_tokenizer.truncation_side = "left"
+
+    directory = snapshot_download("banghua/n_rm")
+    for fpath in os.listdir(directory):
+        if fpath.endswith(".pt") or fpath.endswith(".bin"):
+            checkpoint = os.path.join(directory, fpath)
+            break
+
+    reward_model.load_state_dict(torch.load(checkpoint), strict=False)
+    reward_model.eval()
+    reward_model.requires_grad_(False)
+    reward_device = torch.cuda.device_count() - 1
+    reward_model = reward_model.half().to(reward_device)
+    reward_batch_size = 24
+
+    def get_reward(samples):
+        input_ids = []
+        attention_masks = []
+        encodings_dict = reward_tokenizer(
+            samples,
+            truncation=True,
+            max_length=4096,
+            padding="max_length",
+            return_tensors="pt",
+        ).to(reward_device)
+        input_ids.append(encodings_dict["input_ids"])
+        attention_masks.append(encodings_dict["attention_mask"])
+        return reward_model(input_ids=torch.cat(input_ids), attention_mask=torch.cat(attention_masks))
+
+        mbs = reward_batch_size
+        out = []
+        for i in range(math.ceil(len(samples) / mbs)):
+            batch_ixs = slice(i * mbs, (i + 1) * mbs)
+            rewards = reward_model(input_ids=input_ids[batch_ixs], attention_masks=attention_masks[batch_ixs])
+            out.extend(rewards)
+        return torch.hstack(out)
+
+    def reward_fn(samples, prompts, **kwargs):
+        rewards = get_reward(samples)
+        return rewards
+
+    return reward_fn
+
+
+def main(hparams={}):
+    # reward_fn = create_reward_fn()
+
+    def apply_openchat_format_from_list(sample):
+        str = ""
+        for i, content in enumerate(sample["conversations"]):
+            if i % 2 == 0:
+                str += "GPT4 Correct User: " + content + "<|end_of_turn|>"
+            else:
+                str += "GPT4 Correct Assistant: " + content + "<|end_of_turn|>"
+        str += "GPT4 Correct Assistant:"
+        return {"prompt": str}
+
+    # prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
+    # eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 280)]
+
+    test_format_samples = [{"conversations": ["Hello"]}, {"conversations": ["Hello", "Hi", "How are you today?"]}]
+    reward_tokenizer = AutoTokenizer.from_pretrained("openchat/openchat_3.5")
+    reward_tokenizer.pad_token = reward_tokenizer.unk_token
+    assert reward_tokenizer(apply_openchat_format_from_list(test_format_samples[0])["prompt"]).input_ids == [
+        1,
+        420,
+        6316,
+        28781,
+        3198,
+        3123,
+        1247,
+        28747,
+        22557,
+        32000,
+        420,
+        6316,
+        28781,
+        3198,
+        3123,
+        21631,
+        28747,
+    ]
+    assert reward_tokenizer(apply_openchat_format_from_list(test_format_samples[1])["prompt"]).input_ids == [
+        1,
+        420,
+        6316,
+        28781,
+        3198,
+        3123,
+        1247,
+        28747,
+        22557,
+        32000,
+        420,
+        6316,
+        28781,
+        3198,
+        3123,
+        21631,
+        28747,
+        15359,
+        32000,
+        420,
+        6316,
+        28781,
+        3198,
+        3123,
+        1247,
+        28747,
+        1602,
+        460,
+        368,
+        3154,
+        28804,
+        32000,
+        420,
+        6316,
+        28781,
+        3198,
+        3123,
+        21631,
+        28747,
+    ]
+
+    def from_openchat_to_llama(str_sample):
+        str_sample.strip()
+        if str_sample.startswith("<s>"):
+            str_sample = str_sample[len("<s>") :].strip()
+        assert str_sample.startswith("GPT4 Correct User: ")
+        str = str_sample.replace("<|end_of_turn|>GPT4 Correct User: ", "</s> [INST] ")
+        str = str.replace("<|end_of_turn|>GPT4 Correct Assistant: ", " [/INST] ")
+        str = "[INST]" + str[len("GPT4 Correct User:") :]
+        str = str.replace("<|end_of_turn|>", "</s>")
+        return str
+
+    test_openchat = "GPT4 Correct User: Hello<|end_of_turn|>GPT4 Correct Assistant: Hi<|end_of_turn|>GPT4 Correct User: How's it going?<|end_of_turn|>GPT4 Correct Assistant: It's good.<|end_of_turn|>"
+    test_llama = "[INST] Hello [/INST] Hi</s> [INST] How's it going? [/INST] It's good.</s>"
+    print(from_openchat_to_llama(test_openchat))
+    print(test_llama)
+    assert from_openchat_to_llama(test_openchat) == test_llama
+
+    # print(reward_fn([test_llama], None))
+
+
+if __name__ == "__main__":
+    hparams = {} if len(sys.argv) == 1 else json.loads(sys.argv[1])
+    main(hparams)
