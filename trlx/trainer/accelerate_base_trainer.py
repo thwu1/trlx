@@ -74,7 +74,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
         self.tokenizer.truncation_side = config.tokenizer.truncation_side
         self.tokenizer.sep_token = "<sep>"
         if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = "<|padding|>"
+            self.tokenizer.pad_token = self.tokenizer.unk_token
 
         script_name = os.path.basename(sys.argv[0]).rsplit(".", 1)[0]
         if not isinstance(config.model.model_path, str):
@@ -128,10 +128,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
             elif config.train.tracker is None:
                 self.accelerator.init_trackers(project_name=self.config.train.project_name)
             else:
-                raise ValueError(
-                    f"Only supported trackers are `wandb` and `tensorboard`. Got: `{config.train.tracker}`. "
-                    "Set `tracker` to `None` to disable tracking."
-                )
+                raise ValueError(f"Only supported trackers are `wandb` and `tensorboard`. Got: `{config.train.tracker}`. " "Set `tracker` to `None` to disable tracking.")
 
         self.nth_evaluation = 0
         self.generate_sweep_kwarg = None
@@ -161,10 +158,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
             if self.accelerator.is_main_process and hasattr(model.base_model, "print_trainable_parameters"):
                 model.base_model.print_trainable_parameters()
             if self.config.model.num_layers_unfrozen >= 0:
-                logger.warning(
-                    "The argument num_layers_unfrozen is ignored when using peft, to prevent unexpected behaviour."
-                    "For Lora, use the `LoraConfig` argument `modules_to_save` instead."
-                )
+                logger.warning("The argument num_layers_unfrozen is ignored when using peft, to prevent unexpected behaviour." "For Lora, use the `LoraConfig` argument `modules_to_save` instead.")
 
         return model
 
@@ -234,9 +228,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
             # or add one if it was trimmed with `self.stop_sequences`.
             # When a generation ended due to `max_new_tokens` exhaustion,
             # only then <pad> or <eos> token would not be present in the original sample at the end
-            if append_eos_token and (
-                trimmed or sample[-1] == self.tokenizer.eos_token_id or sample[-1] == self.tokenizer.pad_token_id
-            ):
+            if append_eos_token and (trimmed or sample[-1] == self.tokenizer.eos_token_id or sample[-1] == self.tokenizer.pad_token_id):
                 str_output += self.tokenizer.eos_token
 
             str_prompts.append(str_prompt)
@@ -262,9 +254,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
             kwargs = dict(self.generate_kwargs, **kwargs)
 
         with torch.no_grad():
-            return self.accelerator.unwrap_model(self.model).generate(
-                input_ids=input_ids, attention_mask=attention_mask, **kwargs
-            )
+            return self.accelerator.unwrap_model(self.model).generate(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
 
     def generate_eval(self, input_ids, attention_mask=None, **kwargs):
         """Wraps hf's `generate` adding some specific method's defaults"""
@@ -275,9 +265,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
         kwargs = dict(self.generate_kwargs, **kwargs)
 
         with torch.no_grad():
-            return self.accelerator.unwrap_model(self.model).generate(
-                input_ids=input_ids, attention_mask=attention_mask, **kwargs
-            )
+            return self.accelerator.unwrap_model(self.model).generate(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
 
     def save_pretrained(self, directory: Optional[str] = None, **kwargs):
         """Save the underlying Hugging Face model, tokenizer, and configuration files to a directory for
@@ -375,9 +363,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
             for i_prompt, prompts in enumerate(self.eval_dataloader):
                 metadata = {k: v for k, v in prompts.items() if k != "input_ids" and k != "attention_mask"}
                 if self.generate_sweep_kwarg:
-                    samples = self.generate_eval(
-                        prompts["input_ids"], prompts["attention_mask"], **{gen_sweep_arg: gen_sweep_value}
-                    )
+                    samples = self.generate_eval(prompts["input_ids"], prompts["attention_mask"], **{gen_sweep_arg: gen_sweep_value})
                 else:
                     samples = self.generate_eval(prompts["input_ids"], prompts["attention_mask"])
 
@@ -483,9 +469,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
                     metrics = self.metric_fn(samples=str_samples, prompts=str_prompts, outputs=str_outputs, **metadata)
                     stats["time/metric"] = time() - metric_time
 
-                    mean_metrics = {
-                        f"metrics/{k}{sweep_suffix}": torch.as_tensor(xs).mean(-1).item() for k, xs in metrics.items()
-                    }
+                    mean_metrics = {f"metrics/{k}{sweep_suffix}": torch.as_tensor(xs).mean(-1).item() for k, xs in metrics.items()}
 
                     stats.update(mean_metrics)
 
@@ -535,10 +519,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
         # and we do exhaust the eval dataloader right before each training loop
         self.mb_count += 1
         assert self.mb_count // self.num_mb <= self.config.train.total_steps, "Beyond total steps, something is wrong"
-        if (
-            self.mb_count % self.accelerator.gradient_accumulation_steps == 0
-            or self.mb_count // self.num_mb >= self.config.train.total_steps
-        ):
+        if self.mb_count % self.accelerator.gradient_accumulation_steps == 0 or self.mb_count // self.num_mb >= self.config.train.total_steps:
             context = contextlib.nullcontext
         else:
             context = self.accelerator.no_sync
@@ -617,10 +598,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
                     self.scheduler.step()
                     self.iter_count += 1
 
-                    if (
-                        self.iter_count % self.config.train.checkpoint_interval == 0
-                        or self.iter_count >= self.total_steps
-                    ):
+                    if self.iter_count % self.config.train.checkpoint_interval == 0 or self.iter_count >= self.total_steps:
                         subfolder = f"checkpoint_{self.iter_count:0{len(str(self.total_steps))}d}"
                         directory = os.path.join(self.config.train.checkpoint_dir, subfolder)
                         if self.config.train.save_optimizer:

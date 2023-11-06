@@ -63,9 +63,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
         rollout_loader: DataLoader = self.store.create_loader(self.config.train.batch_size, shuffle=True)
 
         # Prepare multi-GPU acceleration
-        self.model, self.opt, self.scheduler, rollout_loader = self.accelerator.prepare(
-            self.model, self.opt, self.scheduler, rollout_loader
-        )
+        self.model, self.opt, self.scheduler, rollout_loader = self.accelerator.prepare(self.model, self.opt, self.scheduler, rollout_loader)
 
         self.store.clear_history()  # Clear the rollout store
 
@@ -142,9 +140,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             input_ids = query_tensors
             decoder_input_ids = response_tensors
             attention_mask = input_ids.ne(self.tokenizer.pad_token_id).long().to(self.accelerator.device)
-            decoder_attention_mask = (
-                decoder_input_ids.ne(self.tokenizer.pad_token_id).long().to(self.accelerator.device)
-            )
+            decoder_attention_mask = decoder_input_ids.ne(self.tokenizer.pad_token_id).long().to(self.accelerator.device)
             decoder_attention_mask[:, 0] = 1
 
             # Forward pass
@@ -278,6 +274,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             batch: PromptBatch = next(self.prompt_iterator)
 
             rollout_generate_time = time()
+            print("batch:", batch)
 
             # Generate samples from the language model (similar to using HuggingFace `generate` method)
             samples = self.generate(batch["input_ids"], batch["attention_mask"])
@@ -287,21 +284,18 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             device = samples.device
 
             prompt_sizes = torch.tensor([prompt_tensors.shape[1]] * len(prompt_tensors), device=device)
-            padded_samples = self.accelerator.pad_across_processes(
-                samples, dim=1, pad_index=self.tokenizer.eos_token_id, pad_first=False
-            )
-            padded_prompts = self.accelerator.pad_across_processes(
-                prompt_tensors, dim=1, pad_index=self.tokenizer.eos_token_id, pad_first=False
-            )
+            padded_samples = self.accelerator.pad_across_processes(samples, dim=1, pad_index=self.tokenizer.pad_token_id, pad_first=False)
+            padded_prompts = self.accelerator.pad_across_processes(prompt_tensors, dim=1, pad_index=self.tokenizer.pad_token_id, pad_first=False)
             gathered_samples = self.accelerator.gather(padded_samples)
             gathered_prompts = self.accelerator.gather(padded_prompts)
             gathered_prompt_sizes = self.accelerator.gather(prompt_sizes)
             metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
 
             if self.accelerator.is_main_process:
-                all_str_samples, all_str_prompts, all_str_outputs = self.decode(
-                    gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=True
-                )
+                all_str_samples, all_str_prompts, all_str_outputs = self.decode(gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False)
+                print("all_str_samples:", all_str_samples)
+                print("all_str_prompts:", all_str_prompts)
+                print("all_str_outputs:", all_str_outputs)
 
                 rollout_score_time = time()
                 # reward_fn should return list of rewards at each token per sample
@@ -364,9 +358,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
 
             # store statistics of the initial rollout as reference
             if self.ref_mean is None:
-                self.ref_mean, self.ref_std = (scores * scores_mask).sum(dim=1).mean(), (scores * scores_mask).sum(
-                    dim=1
-                ).std()
+                self.ref_mean, self.ref_std = (scores * scores_mask).sum(dim=1).mean(), (scores * scores_mask).sum(dim=1).std()
             all_scores_mean, all_scores_std = self.running_moments.update(torch.sum(scores * scores_mask, dim=1))
             stats["rollout_scores/mean"] = all_scores_mean.item()
             stats["rollout_scores/std"] = all_scores_std.item()
@@ -415,9 +407,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
                 position_ids = attention_mask.long().cumsum(-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 1)
                 with torch.no_grad():
-                    logits, *_, values = self.model(
-                        all_tokens, attention_mask=attention_mask, position_ids=position_ids
-                    )
+                    logits, *_, values = self.model(all_tokens, attention_mask=attention_mask, position_ids=position_ids)
                     # TODO(dahoas): When hydra model works need to also support generation on hydra head
                     if hasattr(self.model, "frozen_head") or self.model.peft_type:
                         ref_logits = self.model.forward_hydra(

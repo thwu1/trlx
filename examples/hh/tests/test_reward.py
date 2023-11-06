@@ -7,6 +7,7 @@ from datasets import load_dataset
 from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from utils import from_openchat_to_llama, from_list_to_openchat
 
 # os.environ["HOME"] = "/scratch/banghua"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4,5,7"
@@ -49,25 +50,17 @@ def create_reward_fn():  # noqa:  C901
             input_ids=None,
             past_key_values=None,
             attention_mask=None,
-            token_type_ids=None,
             position_ids=None,
-            head_mask=None,
-            inputs_embeds=None,
-            mc_token_ids=None,
-            labels=None,
-            return_dict=False,
-            output_attentions=False,
-            output_hidden_states=False,
-            inference=False,
         ):
-            # Split the inputs and rewards into two parts, chosen and rejected
-            print(input_ids)
+            """
+            input_ids, attention_mask: torch.Size([bs, seq_len])
+            return: scores: List[torch.Size([1])
+            """
             bs = input_ids.shape[0]
             transformer_outputs = self.transformer(
                 input_ids,
                 past_key_values=past_key_values,
                 attention_mask=attention_mask,
-                # token_type_ids=token_type_ids,
                 position_ids=position_ids,
             )
             hidden_states = transformer_outputs[0]
@@ -77,13 +70,10 @@ def create_reward_fn():  # noqa:  C901
                 c_inds = (input_ids[i] == self.PAD_ID).nonzero()
                 c_ind = c_inds[0].item() if len(c_inds) > 0 else input_ids.shape[1]
                 scores.append(rewards[i, c_ind - 1])
-            scores = torch.stack(scores)
-            assert scores.shape == torch.Size([bs])
             return scores
 
     reward_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf", token=access_token)
     reward_model = GPTRewardModel("meta-llama/Llama-2-7b-chat-hf", reward_tokenizer.eos_token_id, 0.5)
-    # reward_tokenizer.pad_token = reward_tokenizer.eos_token
     reward_tokenizer = reward_model.tokenizer
     print(reward_tokenizer.pad_token)
     reward_tokenizer.truncation_side = "left"
@@ -111,19 +101,18 @@ def create_reward_fn():  # noqa:  C901
             padding="max_length",
             return_tensors="pt",
         ).to(reward_device)
-        input_ids.append(encodings_dict["input_ids"])
-        attention_masks.append(encodings_dict["attention_mask"])
-        return reward_model(input_ids=torch.cat(input_ids), attention_mask=torch.cat(attention_masks))
+        input_ids = encodings_dict["input_ids"]
+        attention_masks = encodings_dict["attention_mask"]
 
         mbs = reward_batch_size
         out = []
         for i in range(math.ceil(len(samples) / mbs)):
-            batch_ixs = slice(i * mbs, (i + 1) * mbs)
-            rewards = reward_model(input_ids=input_ids[batch_ixs], attention_masks=attention_masks[batch_ixs])
+            rewards = reward_model(input_ids=input_ids[i * mbs : (i + 1) * mbs], attention_mask=attention_masks[i * mbs : (i + 1) * mbs])
             out.extend(rewards)
         return torch.hstack(out)
 
     def reward_fn(samples, prompts, **kwargs):
+        samples = [from_openchat_to_llama(s) for s in samples]
         rewards = get_reward(samples)
         return rewards
 
@@ -131,25 +120,10 @@ def create_reward_fn():  # noqa:  C901
 
 
 def main(hparams={}):
-    # reward_fn = create_reward_fn()
-
-    def apply_openchat_format_from_list(sample):
-        str = ""
-        for i, content in enumerate(sample["conversations"]):
-            if i % 2 == 0:
-                str += "GPT4 Correct User: " + content + "<|end_of_turn|>"
-            else:
-                str += "GPT4 Correct Assistant: " + content + "<|end_of_turn|>"
-        str += "GPT4 Correct Assistant:"
-        return {"prompt": str}
-
-    # prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
-    # eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 280)]
-
     test_format_samples = [{"conversations": ["Hello"]}, {"conversations": ["Hello", "Hi", "How are you today?"]}]
     reward_tokenizer = AutoTokenizer.from_pretrained("openchat/openchat_3.5")
     reward_tokenizer.pad_token = reward_tokenizer.unk_token
-    assert reward_tokenizer(apply_openchat_format_from_list(test_format_samples[0])["prompt"]).input_ids == [
+    assert reward_tokenizer(from_list_to_openchat(test_format_samples[0])["prompt"]).input_ids == [
         1,
         420,
         6316,
@@ -168,7 +142,7 @@ def main(hparams={}):
         21631,
         28747,
     ]
-    assert reward_tokenizer(apply_openchat_format_from_list(test_format_samples[1])["prompt"]).input_ids == [
+    assert reward_tokenizer(from_list_to_openchat(test_format_samples[1])["prompt"]).input_ids == [
         1,
         420,
         6316,
@@ -210,24 +184,19 @@ def main(hparams={}):
         28747,
     ]
 
-    def from_openchat_to_llama(str_sample):
-        str_sample.strip()
-        if str_sample.startswith("<s>"):
-            str_sample = str_sample[len("<s>") :].strip()
-        assert str_sample.startswith("GPT4 Correct User: ")
-        str = str_sample.replace("<|end_of_turn|>GPT4 Correct User: ", "</s> [INST] ")
-        str = str.replace("<|end_of_turn|>GPT4 Correct Assistant: ", " [/INST] ")
-        str = "[INST]" + str[len("GPT4 Correct User:") :]
-        str = str.replace("<|end_of_turn|>", "</s>")
-        return str
-
     test_openchat = "GPT4 Correct User: Hello<|end_of_turn|>GPT4 Correct Assistant: Hi<|end_of_turn|>GPT4 Correct User: How's it going?<|end_of_turn|>GPT4 Correct Assistant: It's good.<|end_of_turn|>"
     test_llama = "[INST] Hello [/INST] Hi</s> [INST] How's it going? [/INST] It's good.</s>"
-    print(from_openchat_to_llama(test_openchat))
-    print(test_llama)
     assert from_openchat_to_llama(test_openchat) == test_llama
 
-    # print(reward_fn([test_llama], None))
+    reward_fn = create_reward_fn()
+    print(
+        reward_fn(
+            samples=[test_openchat, test_openchat, test_openchat],
+            prompts=None,
+            outputs=None,
+            addi=3,
+        )
+    )
 
 
 if __name__ == "__main__":

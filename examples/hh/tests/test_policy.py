@@ -12,6 +12,7 @@ from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tritonclient.utils import np_to_triton_dtype
+from utils import from_openchat_to_llama, from_list_to_openchat
 
 import trlx
 from trlx.data.default_configs import (
@@ -26,11 +27,11 @@ from trlx.data.default_configs import (
 
 default_config = TRLConfig(
     train=TrainConfig(
-        seq_length=1024,
+        seq_length=4096,
         epochs=10000,
         total_steps=10000,
-        batch_size=4,
-        eval_batch_size=32,
+        batch_size=1,
+        eval_batch_size=1,
         checkpoint_interval=10000,
         eval_interval=500,
         pipeline="PromptPipeline",
@@ -43,8 +44,8 @@ default_config = TRLConfig(
     scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=8e-6)),
     method=PPOConfig(
         name="PPOConfig",
-        num_rollouts=64,
-        chunk_size=16,
+        num_rollouts=4,
+        chunk_size=2,
         ppo_epochs=4,
         init_kl_coef=0.05,
         target=6,
@@ -59,19 +60,13 @@ default_config = TRLConfig(
         ref_std=None,
         cliprange_reward=10,
         gen_kwargs=dict(
-            max_new_tokens=4096,
+            max_new_tokens=2048,
             top_k=0,
             top_p=1.0,
             do_sample=True,
         ),
     ),
 )
-
-# TODO: test the reward model
-# implement reward template, need to substitute the special tokens with the reward template when evaluate
-# the reward model should get sample
-# dataset template
-# implement the policy template, figure out padding
 
 
 def main(hparams={}):
@@ -80,29 +75,17 @@ def main(hparams={}):
     dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train[:200]")
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
 
-    def apply_openchat_format_from_list(sample):
-        str = ""
-        for i, content in enumerate(sample["conversations"]):
-            if i % 2 == 0:
-                str += "GPT4 Correct User: " + content + "<|end_of_turn|>"
-            else:
-                str += "GPT4 Correct Assistant: " + content + "<|end_of_turn|>"
-        str += "GPT4 Correct Assistant:"
-        return {"prompt": str}
-
-    dataset = dataset.map(apply_openchat_format_from_list)
+    dataset = dataset.map(from_list_to_openchat)
     prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
     eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 280)]
 
-    def fake_reward_fn(samples, prompts, **kwargs):
+    def fake_reward_fn(samples, **kwargs):
         return torch.zeros(len(samples))
-
-    reward_fn = fake_reward_fn
 
     trlx.train(
         prompts=prompts,
         eval_prompts=eval_prompts,
-        reward_fn=reward_fn,
+        reward_fn=fake_reward_fn,
         config=config,
         stop_sequences=["GPT4 Correct User:", "GPT4 Correct Assistant:"],
     )
