@@ -288,11 +288,12 @@ class MistralModelWithHydraValueHead(PreTrainedModelWrapper):
     ):
         super().__init__(base_model, peft_config=peft_config)
         self.num_value_layers_unfrozen = num_value_layers_unfrozen
-        self.v_head = VModel()
+        self.base_model.to("cuda:0")
+        self.v_head = VModel().to("cuda:1")
         self.frozen_head = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
         for param in self.frozen_head.parameters():
             param.requires_grad = False
-        self.frozen_head = self.frozen_head.eval()
+        self.frozen_head = self.frozen_head.eval().to("cuda:2")
 
     def forward(
         self,
