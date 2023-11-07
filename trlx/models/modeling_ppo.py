@@ -8,11 +8,13 @@ from typing import List, Optional, Tuple, Union
 import deepspeed
 import numpy as np
 import torch
+from torch import nn
 import transformers
 from torchtyping import TensorType
 from transformers.modeling_outputs import ModelOutput
 from transformers.models.bloom import modeling_bloom
 from transformers.models.opt import modeling_opt
+from transformers import AutoModelForCausalLM
 
 from trlx.data.method_configs import MethodConfig, register_method
 from trlx.models.modeling_base import PreTrainedModelWrapper
@@ -263,6 +265,143 @@ def make_value_branch(base_model, num_value_layers_unfrozen):
     return value_branch
 
 
+class VModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.base_model = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5").model
+        self.v_head = nn.Linear(4096, 1, bias=False)
+
+    def forward(self, *args, **kwargs):
+        return self.v_head(self.base_model(*args, **kwargs)[0]).squeeze(-1)
+
+
+class MistralModelWithHydraValueHead(PreTrainedModelWrapper):
+    """An `AutoModel` class wrapper for `transformers` causal models that have a
+    language modeling head and a value head
+    """
+
+    def __init__(
+        self,
+        base_model: transformers.PreTrainedModel,
+        peft_config=None,
+        num_value_layers_unfrozen=0,
+    ):
+        super().__init__(base_model, peft_config=peft_config)
+        self.num_value_layers_unfrozen = num_value_layers_unfrozen
+        self.v_head = VModel()
+        self.frozen_head = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
+        for param in self.frozen_head.parameters():
+            param.requires_grad = False
+        self.frozen_head = self.frozen_head.eval()
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        position_ids: Optional[List[torch.FloatTensor]] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        ignore_peft_adapter: Optional[bool] = None,
+    ) -> Union[Tuple, CausalLMOutputWithValue]:
+        forward_kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "output_hidden_states": True,
+            "return_dict": True,
+        }
+
+        outputs = self.base_model(**forward_kwargs)
+        value = self.v_head(**forward_kwargs)
+
+        if not return_dict:
+            outputs = (outputs.logits,) + outputs[1:] + (value,)
+            return outputs
+
+        return CausalLMOutputWithValue(**outputs, value=value)
+
+    def forward_hydra(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        position_ids: Optional[List[torch.FloatTensor]] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[torch.FloatTensor, CausalLMOutputWithValue]:
+        forward_kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "output_hidden_states": True,
+            "return_dict": True,
+        }
+
+        hydra_outputs = self.frozen_head(**forward_kwargs)
+
+        if not return_dict:
+            return hydra_outputs.logits
+        return hydra_outputs
+
+    def generate(self, *args, **kwargs) -> Union[ModelOutput, torch.LongTensor]:
+        return self.base_model.generate(*args, **kwargs)
+
+    def state_dict(self, *args, heads_only=False, **kwargs):
+        """
+        Returns the state dictionary of the model. We add the state dictionary of the value head
+        to the state dictionary of the wrapped model by prepending the key with `v_head.`.
+        """
+        state_dict = self.v_head.state_dict(*args, **dict(prefix="v_head.", **kwargs))
+        if not heads_only:
+            state_dict = {
+                **state_dict,
+                **self.base_model.state_dict(*args, **dict(prefix="" if self.peft_type else "base_model.", **kwargs)),
+            }
+
+            if self.frozen_head:
+                state_dict = {
+                    **state_dict,
+                    **self.frozen_head.state_dict(*args, **dict(prefix="frozen_head.", **kwargs)),
+                }
+
+        return state_dict
+
+    def post_init(self, state_dict):
+        """
+        Load `state_dict` into the model. If peft was used to train the model,
+        only the value head would be present in the loaded `state_dict`, so the
+        loading has to be not strict. Also `frozen_head` will be recreated and
+        loaded from the checkpoint, to comply with deepspeed checkpoint loading.
+        """
+        strict = not self.peft_type and any(k.startswith("base_model.") or k.startswith("v_head.") for k in state_dict)
+
+        # if not self.peft_type and self.frozen_head is None:
+        #     for k in state_dict:
+        #         match = re.search(r"^frozen_head\..+\.(\d+)\.", k)
+        #         if match:
+        #             self.num_layers_unfrozen = max(self.num_layers_unfrozen, int(match.group(1)) + 1)
+
+        #     config = self.base_model.config
+        #     branch_class = hf_get_branch_class(config)
+        #     self.frozen_head = branch_class(
+        #         self.base_model,
+        #         num_layers_unfrozen=self.num_layers_unfrozen,
+        #     ).eval()
+
+        self.load_state_dict(state_dict, strict=strict)
+        del state_dict
+        gc.collect()  # noqa: E702
+
+
 class AutoModelForCausalLMWithValueHead(PreTrainedModelWrapper):
     """An `AutoModel` class wrapper for `transformers` causal models that have a
     language modeling head and a value head
@@ -338,7 +477,9 @@ class AutoModelForCausalLMWithValueHead(PreTrainedModelWrapper):
                 outputs.hidden_states[-(self.num_value_layers_unfrozen + 1)],
                 output_shape=output_shape,
                 **forward_kwargs,
-            )[0].squeeze(-1)
+            )[
+                0
+            ].squeeze(-1)
         else:
             value = self.v_head(outputs.hidden_states[-(self.num_value_layers_unfrozen + 1)]).squeeze(-1)
 
@@ -566,9 +707,7 @@ class GPTModelBranch(ModelBranch):
         batch_size, seq_length = hidden_states.shape[:2]
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -706,9 +845,7 @@ class OPTModelBranch(ModelBranch):
         https://github.com/huggingface/transformers/blob/bdb84e2bada3658f99c6a81c963ec562f8485151/src/transformers/models/opt/modeling_opt.py#L840  # noqa: E501
         """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -734,12 +871,8 @@ class OPTModelBranch(ModelBranch):
             ).to(hidden_states.device)
 
         if attention_mask is not None:
-            expanded_attn_mask = modeling_opt._expand_mask(
-                attention_mask, hidden_states.dtype, tgt_len=input_shape[-1]
-            ).to(hidden_states.device)
-            combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-            )
+            expanded_attn_mask = modeling_opt._expand_mask(attention_mask, hidden_states.dtype, tgt_len=input_shape[-1]).to(hidden_states.device)
+            combined_attention_mask = expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
         attention_mask = combined_attention_mask
 
         all_hidden_states = () if output_hidden_states else None
@@ -749,10 +882,7 @@ class OPTModelBranch(ModelBranch):
         for attn_mask, mask_name in zip([head_mask], ["head_mask"]):
             if attn_mask is not None:
                 if attn_mask.size()[0] != (len(self.decoder_blocks)):
-                    raise ValueError(
-                        f"The `{mask_name}` should be specified for {len(self.decoder_blocks)} layers, but it is for"
-                        f" {head_mask.size()[0]}."
-                    )
+                    raise ValueError(f"The `{mask_name}` should be specified for {len(self.decoder_blocks)} layers, but it is for" f" {head_mask.size()[0]}.")
 
         for idx, decoder_layer in enumerate(self.decoder_blocks):
             if output_hidden_states:
@@ -833,9 +963,7 @@ class BloomModelBranch(ModelBranch):
         https://github.com/huggingface/transformers/blob/2411f0e465e761790879e605a4256f3d4afb7f82/src/transformers/models/bloom/modeling_bloom.py#L623  # noqa: E501
         """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -875,9 +1003,7 @@ class BloomModelBranch(ModelBranch):
             )
 
         expanded_attn_mask = modeling_bloom._expand_mask(attention_mask, tgt_length=src_length)
-        combined_attention_mask = (
-            expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask | combined_attention_mask
-        )
+        combined_attention_mask = expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask | combined_attention_mask
         causal_mask = combined_attention_mask
 
         for i, (block, layer_past) in enumerate(zip(self.decoder_blocks, past_key_values)):
@@ -962,18 +1088,12 @@ class LlamaModelBranch(ModelBranch):
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
         if input_shape[-1] > 1:
-            combined_attention_mask = self._make_causal_mask(
-                input_shape, hidden_states.dtype, past_key_values_length=past_key_values_length
-            ).to(hidden_states.device)
+            combined_attention_mask = self._make_causal_mask(input_shape, hidden_states.dtype, past_key_values_length=past_key_values_length).to(hidden_states.device)
 
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = self._expand_mask(attention_mask, hidden_states.dtype, tgt_len=input_shape[-1]).to(
-                hidden_states.device
-            )
-            combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-            )
+            expanded_attn_mask = self._expand_mask(attention_mask, hidden_states.dtype, tgt_len=input_shape[-1]).to(hidden_states.device)
+            combined_attention_mask = expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
         return combined_attention_mask
 
     def forward(
@@ -995,9 +1115,7 @@ class LlamaModelBranch(ModelBranch):
         https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L491
         """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
@@ -1011,21 +1129,15 @@ class LlamaModelBranch(ModelBranch):
 
         if position_ids is None:
             device = hidden_states.device if hidden_states is not None else encoder_hidden_states.device
-            position_ids = torch.arange(
-                past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
-            )
+            position_ids = torch.arange(past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device)
             position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
         else:
             position_ids = position_ids.view(-1, seq_length).long()
 
         # embed positions
         if attention_mask is None:
-            attention_mask = torch.ones(
-                (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
-            )
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, (batch_size, seq_length), hidden_states, past_key_values_length
-        )
+            attention_mask = torch.ones((batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device)
+        attention_mask = self._prepare_decoder_attention_mask(attention_mask, (batch_size, seq_length), hidden_states, past_key_values_length)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -1114,9 +1226,7 @@ class GPTBigCodeModelBranch(ModelBranch):
         https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt_bigcode/modeling_gpt_bigcode.py#L539
         """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1139,9 +1249,7 @@ class GPTBigCodeModelBranch(ModelBranch):
         self_attention_mask = self.bias[None, key_length - query_length : key_length, :key_length].to(device)
 
         if attention_mask is not None:
-            self_attention_mask = self_attention_mask * attention_mask.view(batch_size, 1, -1).to(
-                dtype=torch.bool, device=self_attention_mask.device
-            )
+            self_attention_mask = self_attention_mask * attention_mask.view(batch_size, 1, -1).to(dtype=torch.bool, device=self_attention_mask.device)
 
         # MQA models: (batch_size, query_length, n_heads, key_length)
         # MHA models: (batch_size, n_heads, query_length, key_length)
@@ -1510,18 +1618,14 @@ class T5Branch(ModelBranch):
         batch_size, seq_length = hidden_states.shape[:2]
         input_shape = (batch_size, seq_length)
 
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if attention_mask is None:
             attention_mask = torch.ones(batch_size, seq_length, device=hidden_states.device)
         if self.is_decoder and encoder_attention_mask is None and encoder_hidden_states is not None:
             encoder_seq_length = encoder_hidden_states.shape[1]
-            encoder_attention_mask = torch.ones(
-                batch_size, encoder_seq_length, device=hidden_states.device, dtype=torch.long
-            )
+            encoder_attention_mask = torch.ones(batch_size, encoder_seq_length, device=hidden_states.device, dtype=torch.long)
 
         extended_attention_mask = self.get_extended_attention_mask(attention_mask, input_shape)
 
@@ -1609,6 +1713,7 @@ def hf_get_branch_class(
     bloom_branch_supported_archs = ["BloomModel", "BloomForCausalLM"]
     llama_branch_supported_archs = ["LlamaModel", "LlamaForCausalLM"]
     bigcode_branch_supported_archs = ["GPTBigCodeModel", "GPTBigCodeForCausalLM"]
+    mistral_supported_archs = ["MistralForCausalLM"]
     arch = config.architectures[0]
     if arch in gpt_branch_supported_archs:
         return GPTModelBranch
@@ -1631,7 +1736,4 @@ def hf_get_branch_class(
             ],
             [],
         )
-        raise ValueError(
-            f"Unsupported architecture: `{arch}`. The following architectures are "
-            f"available for model branching:\n{all_supported_archs}"
-        )
+        raise ValueError(f"Unsupported architecture: `{arch}`. The following architectures are " f"available for model branching:\n{all_supported_archs}")

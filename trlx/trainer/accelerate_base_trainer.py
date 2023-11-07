@@ -74,7 +74,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
         self.tokenizer.truncation_side = config.tokenizer.truncation_side
         self.tokenizer.sep_token = "<sep>"
         if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.unk_token
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
         script_name = os.path.basename(sys.argv[0]).rsplit(".", 1)[0]
         if not isinstance(config.model.model_path, str):

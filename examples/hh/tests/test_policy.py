@@ -25,9 +25,11 @@ from trlx.data.default_configs import (
     TRLConfig,
 )
 
+# accelerate launch --num_processes 2 --config_file ../../configs/accelerate/zero2-bf16.yaml tests/test_policy.py
+
 default_config = TRLConfig(
     train=TrainConfig(
-        seq_length=4096,
+        seq_length=1024,
         epochs=10000,
         total_steps=10000,
         batch_size=1,
@@ -60,7 +62,7 @@ default_config = TRLConfig(
         ref_std=None,
         cliprange_reward=10,
         gen_kwargs=dict(
-            max_new_tokens=2048,
+            max_new_tokens=128,
             top_k=0,
             top_p=1.0,
             do_sample=True,
@@ -72,7 +74,7 @@ default_config = TRLConfig(
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
 
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train[:200]")
+    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train[:40]")
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
 
     dataset = dataset.map(from_list_to_openchat)

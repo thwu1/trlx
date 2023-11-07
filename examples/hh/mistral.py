@@ -75,6 +75,7 @@ default_config = TRLConfig(
 # review the mistral model structure and figure out how to add value head
 # implement the mistral conpatiable modeling
 # check the generation
+# for openchat-3.5, pad token should be eos token = <|end_of_turn|>
 
 
 def prepare_tensor(name: str, input):
@@ -158,7 +159,7 @@ def create_reward_fn():  # noqa:  C901
     reward_model.requires_grad_(False)
     reward_device = torch.cuda.device_count() - 1
     reward_model = reward_model.half().to(reward_device)
-    reward_batch_size = 24
+    reward_batch_size = 2
 
     def get_reward(samples):
         """samples: List[str]"""

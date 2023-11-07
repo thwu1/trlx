@@ -11,6 +11,7 @@ import transformers
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM
 
 import trlx.utils.logging as logging
 from trlx.data.accelerate_base_datatypes import PromptBatch
@@ -18,6 +19,7 @@ from trlx.data.configs import TRLConfig
 from trlx.data.ppo_types import PPORLBatch, PPORLElement
 from trlx.models.modeling_ppo import (
     AdaptiveKLController,
+    MistralModelWithHydraValueHead,
     AutoModelForCausalLMWithHydraValueHead,
     AutoModelForSeq2SeqLMWithHydraValueHead,
     FixedKLController,
@@ -104,10 +106,14 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
 
     def get_arch(self, config: TRLConfig):
         """Get the model"""
+        if config.model.model_path == "openchat/openchat_3.5":
+            print("returning MistralModelWithHydraValueHead")
+            base_model = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
+            return MistralModelWithHydraValueHead(base_model=base_model)
+
         model_class = AutoModelForCausalLMWithHydraValueHead
         if config.model.model_arch_type == "seq2seq":
             model_class = AutoModelForSeq2SeqLMWithHydraValueHead
-
         from_fn = model_class.from_pretrained
         # backward-compat: Try to create a randomly initialized architecture from a config
         if issubclass(type(config.model.model_path), transformers.PretrainedConfig):

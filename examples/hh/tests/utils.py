@@ -14,8 +14,8 @@ def from_list_to_openchat(sample):
     str = ""
     for i, content in enumerate(sample["conversations"]):
         if i % 2 == 0:
-            str += "GPT4 Correct User: " + content + "<|end_of_turn|>"
+            str += "GPT4 Correct User: " + content + "<|end_of_turn|> "
         else:
-            str += "GPT4 Correct Assistant: " + content + "<|end_of_turn|>"
+            str += "GPT4 Correct Assistant: " + content + "<|end_of_turn|> "
     str += "GPT4 Correct Assistant:"
     return {"prompt": str}
