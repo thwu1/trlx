@@ -159,6 +159,11 @@ class AccelerateRLTrainer(BaseRLTrainer):
                 model.base_model.print_trainable_parameters()
             if self.config.model.num_layers_unfrozen >= 0:
                 logger.warning("The argument num_layers_unfrozen is ignored when using peft, to prevent unexpected behaviour." "For Lora, use the `LoraConfig` argument `modules_to_save` instead.")
+        for name, param in model.named_parameters():
+            print(name, param.requires_grad)
+        print(model.base_model)
+        print(model.v_head)
+        print(model.frozen_head)
 
         return model
 

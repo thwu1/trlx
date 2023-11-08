@@ -25,7 +25,10 @@ from trlx.data.default_configs import (
     TRLConfig,
 )
 
+# export HOME=/scratch/banghua
+# cd trlx/examples/hh
 # accelerate launch --num_processes 2 --config_file ../../configs/accelerate/zero2-bf16.yaml tests/test_policy.py
+# python -m debugpy --listen 5679 -m accelerate.commands.launch  --num_processes 2 --config_file ../../configs/accelerate/zero2-bf16.yaml tests/test_policy.py
 
 default_config = TRLConfig(
     train=TrainConfig(

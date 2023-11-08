@@ -107,9 +107,9 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
     def get_arch(self, config: TRLConfig):
         """Get the model"""
         if config.model.model_path == "openchat/openchat_3.5":
-            print("returning MistralModelWithHydraValueHead")
+            print("Model is MistralModelWithHydraValueHead")
             base_model = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
-            return MistralModelWithHydraValueHead(base_model=base_model)
+            return MistralModelWithHydraValueHead(base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen)
 
         model_class = AutoModelForCausalLMWithHydraValueHead
         if config.model.model_arch_type == "seq2seq":
@@ -280,7 +280,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             batch: PromptBatch = next(self.prompt_iterator)
 
             rollout_generate_time = time()
-            print("batch:", batch)
+            # print("batch:", batch)
 
             # Generate samples from the language model (similar to using HuggingFace `generate` method)
             samples = self.generate(batch["input_ids"], batch["attention_mask"])
@@ -299,9 +299,9 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
 
             if self.accelerator.is_main_process:
                 all_str_samples, all_str_prompts, all_str_outputs = self.decode(gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False)
-                print("all_str_samples:", all_str_samples)
-                print("all_str_prompts:", all_str_prompts)
-                print("all_str_outputs:", all_str_outputs)
+                # print("all_str_samples:", all_str_samples)
+                # print("all_str_prompts:", all_str_prompts)
+                # print("all_str_outputs:", all_str_outputs)
 
                 rollout_score_time = time()
                 # reward_fn should return list of rewards at each token per sample
@@ -339,6 +339,9 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             scores_mask = scores != -np.inf
 
             str_samples, str_prompts, str_outputs = self.decode(prompt_tensors, samples, append_eos_token=True)
+            # print("str_samples:", str_samples)
+            # print("str_prompts:", str_prompts)
+            # print("str_outputs:", str_outputs)
 
             # Pad the sample outputs
             outputs = self.tokenizer(str_outputs).input_ids
@@ -358,6 +361,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
                 for output in outputs
             ]
             sample_outputs = torch.vstack(outputs).to(device)
+            # print("sample_outputs:", sample_outputs)
 
             if self.config.method.cliprange_reward:
                 scores = torch.clip(scores, -self.config.method.cliprange_reward, self.config.method.cliprange_reward)
