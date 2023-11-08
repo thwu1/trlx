@@ -286,6 +286,7 @@ class MistralModelBranch(transformers.PreTrainedModel):
         self.vocab_size = base_model.model.config.vocab_size
 
         self.embed_tokens = deepcopy(base_model.model.embed_tokens)
+        self.embed_tokens.requires_grad_(False)
         self.layers = deepcopy(base_model.model.layers[-num_layers_unfrozen:])
         self.norm = deepcopy(base_model.model.norm)
         self.lm_head = deepcopy(base_model.lm_head)

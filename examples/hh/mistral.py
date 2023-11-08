@@ -102,7 +102,7 @@ def create_reward_fn():  # noqa:  C901
             self.alpha = alpha
             self.v_head = nn.Linear(self.config.n_embd, 1, bias=False)
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-            print("tokenizer eos token=", self.tokenizer.eos_token)
+            print("Reward tokenizer eos token:", self.tokenizer.eos_token)
             # self.tokenizer.eos_token_id = eos_token_id
             self.tokenizer.pad_token = self.tokenizer.unk_token
             self.PAD_ID = self.tokenizer(self.tokenizer.pad_token)["input_ids"][0]
@@ -145,7 +145,7 @@ def create_reward_fn():  # noqa:  C901
     reward_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
     reward_model = GPTRewardModel("meta-llama/Llama-2-7b-chat-hf", reward_tokenizer.eos_token_id, 0.5)
     reward_tokenizer = reward_model.tokenizer
-    print("tokenizer pad token:", reward_tokenizer.pad_token)
+    print("Reward tokenizer pad token:", reward_tokenizer.pad_token)
     reward_tokenizer.truncation_side = "left"
 
     directory = snapshot_download("banghua/n_rm")
