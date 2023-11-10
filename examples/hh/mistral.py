@@ -27,15 +27,17 @@ from trlx.data.default_configs import (
 
 default_config = TRLConfig(
     train=TrainConfig(
-        seq_length=1024,
+        seq_length=2048,
         epochs=10000,
         total_steps=10000,
-        batch_size=1,
-        eval_batch_size=1,
-        checkpoint_interval=500,
+        batch_size=4,
+        eval_batch_size=4,
+        checkpoint_interval=1000,
         eval_interval=500,
         pipeline="PromptPipeline",
         trainer="AcceleratePPOTrainer",
+        save_best=True,
+        save_optimizer=False,
         checkpoint_dir="checkpoints/ppo_hh",
     ),
     model=ModelConfig(model_path="openchat/openchat_3.5", num_layers_unfrozen=2),
@@ -44,23 +46,23 @@ default_config = TRLConfig(
     scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=5e-7)),
     method=PPOConfig(
         name="PPOConfig",
-        num_rollouts=4,
-        chunk_size=2,
-        ppo_epochs=4,
-        init_kl_coef=0.05,
-        target=6,
+        num_rollouts=64,
+        chunk_size=4,
+        ppo_epochs=2,
+        init_kl_coef=0.01,
+        target=None,
         horizon=10000,
         gamma=1,
         lam=0.95,
         cliprange=0.2,
         cliprange_value=0.2,
-        vf_coef=1,
+        vf_coef=0.5,
         scale_reward="running",
         ref_mean=None,
         ref_std=None,
         cliprange_reward=10,
         gen_kwargs=dict(
-            max_new_tokens=128,
+            max_new_tokens=2048,
             top_k=0,
             top_p=1.0,
             do_sample=True,
@@ -154,12 +156,13 @@ def create_reward_fn():  # noqa:  C901
             checkpoint = os.path.join(directory, fpath)
             break
 
-    reward_model.load_state_dict(torch.load(checkpoint), strict=False)
-    reward_model.eval()
-    reward_model.requires_grad_(False)
-    reward_device = torch.cuda.device_count() - 1
-    reward_model = reward_model.half().to(reward_device)
-    reward_batch_size = 2
+    if os.environ.get("LOCAL_RANK", "0") == "0":
+        reward_model.load_state_dict(torch.load(checkpoint), strict=False)
+        reward_model.eval()
+        reward_model.requires_grad_(False)
+        reward_device = torch.cuda.device_count() - 1
+        reward_model = reward_model.to(reward_device)
+        reward_batch_size = 2
 
     def get_reward(samples):
         """samples: List[str]"""
@@ -168,7 +171,7 @@ def create_reward_fn():  # noqa:  C901
         encodings_dict = reward_tokenizer(
             samples,
             truncation=True,
-            max_length=4096,
+            max_length=2048,
             padding="max_length",
             return_tensors="pt",
         ).to(reward_device)
@@ -192,12 +195,12 @@ def create_reward_fn():  # noqa:  C901
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train[:40]")
+    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train")
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     dataset = dataset.map(from_list_to_openchat)
 
     prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
-    eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 280)]
+    eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 50)]
     reward_fn = create_reward_fn()
 
     trlx.train(
