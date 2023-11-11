@@ -4,21 +4,23 @@ import os
 import sys
 from itertools import islice
 
-import numpy as np
+# import numpy as np
 import torch
-import tritonclient.grpc as client_util
+
+# import tritonclient.grpc as client_util
 from datasets import load_dataset
 from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from tritonclient.utils import np_to_triton_dtype
+
+# from tritonclient.utils import np_to_triton_dtype
 from utils import from_openchat_to_llama, from_list_to_openchat
 
 import trlx
 from trlx.data.default_configs import (
     ModelConfig,
     OptimizerConfig,
-    PPOConfig,
+    P3OConfig,
     SchedulerConfig,
     TokenizerConfig,
     TrainConfig,
@@ -27,40 +29,36 @@ from trlx.data.default_configs import (
 
 default_config = TRLConfig(
     train=TrainConfig(
-        seq_length=1024,
+        seq_length=2048,
         epochs=10000,
         total_steps=10000,
         batch_size=1,
-        eval_batch_size=1,
+        eval_batch_size=4,
         checkpoint_interval=500,
         eval_interval=500,
         pipeline="PromptPipeline",
-        trainer="AcceleratePPOTrainer",
-        checkpoint_dir="checkpoints/ppo_hh",
+        trainer="AccelerateP3OTrainer",
+        checkpoint_dir="checkpoints/p3o_hh",
     ),
-    model=ModelConfig(model_path="openchat/openchat_3.5", num_layers_unfrozen=2),
+    model=ModelConfig(model_path="openchat/openchat_3.5", num_layers_unfrozen=4),
     tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
     optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=5e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
     scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=5e-7)),
-    method=PPOConfig(
-        name="PPOConfig",
-        num_rollouts=4,
-        chunk_size=2,
-        ppo_epochs=4,
-        init_kl_coef=0.05,
-        target=6,
-        horizon=10000,
-        gamma=1,
-        lam=0.95,
+    method=P3OConfig(
+        name="P3OConfig",
+        num_responses_per_query=2,
+        num_rollouts=32,
+        chunk_size=1,
+        p3o_epochs=4,
+        kl_coef=0.01,
         cliprange=0.2,
-        cliprange_value=0.2,
-        vf_coef=1,
+        cliprange_ratio=10.0,
         scale_reward="running",
         ref_mean=None,
         ref_std=None,
         cliprange_reward=10,
         gen_kwargs=dict(
-            max_new_tokens=128,
+            max_new_tokens=1024,
             top_k=0,
             top_p=1.0,
             do_sample=True,
@@ -68,6 +66,7 @@ default_config = TRLConfig(
     ),
 )
 
+# accelerate launch --num_processes 2 --config_file ../../configs/accelerate/zero2-bf16.yaml mistral_p3o.py
 # TODO: test the reward model (done)
 # implement reward template, need to substitute the special tokens with the reward template when evaluate (done)
 # dataset template (done)
@@ -78,10 +77,10 @@ default_config = TRLConfig(
 # for openchat-3.5, pad token should be eos token = <|end_of_turn|>
 
 
-def prepare_tensor(name: str, input):
-    t = client_util.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
-    t.set_data_from_numpy(input)
-    return t
+# def prepare_tensor(name: str, input):
+#     t = client_util.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
+#     t.set_data_from_numpy(input)
+#     return t
 
 
 def create_reward_fn():  # noqa:  C901
@@ -159,7 +158,7 @@ def create_reward_fn():  # noqa:  C901
     reward_model.requires_grad_(False)
     reward_device = torch.cuda.device_count() - 1
     reward_model = reward_model.half().to(reward_device)
-    reward_batch_size = 2
+    reward_batch_size = 4
 
     def get_reward(samples):
         """samples: List[str]"""
@@ -168,7 +167,7 @@ def create_reward_fn():  # noqa:  C901
         encodings_dict = reward_tokenizer(
             samples,
             truncation=True,
-            max_length=4096,
+            max_length=2048,
             padding="max_length",
             return_tensors="pt",
         ).to(reward_device)
@@ -192,7 +191,7 @@ def create_reward_fn():  # noqa:  C901
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train[:40]")
+    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train")
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     dataset = dataset.map(from_list_to_openchat)
 

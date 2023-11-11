@@ -10,13 +10,14 @@ import torch.nn.functional as F
 import transformers
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import trlx.utils.logging as logging
 from trlx.data.accelerate_base_datatypes import PromptBatch
 from trlx.data.configs import TRLConfig
 from trlx.data.p3o_types import P3ORLBatch, P3ORLElement
 from trlx.models.modeling_p3o import (
+    MistralModelWithHydraHead,
     AutoModelForCausalLMWithHydraValueHead,
     AutoModelForSeq2SeqLMWithHydraValueHead,
 )
@@ -38,7 +39,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
     tokenizer: AutoTokenizer
 
     def __init__(self, config: TRLConfig, **kwargs):
-        """PPO Accelerate Trainer initialization
+        """P3O Accelerate Trainer initialization
 
         Args:
             config: Config
@@ -61,9 +62,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         rollout_loader: DataLoader = self.store.create_loader(self.config.train.batch_size, shuffle=True)
 
         # Prepare multi-GPU acceleration
-        self.model, self.opt, self.scheduler, rollout_loader = self.accelerator.prepare(
-            self.model, self.opt, self.scheduler, rollout_loader
-        )
+        self.model, self.opt, self.scheduler, rollout_loader = self.accelerator.prepare(self.model, self.opt, self.scheduler, rollout_loader)
 
         self.store.clear_history()  # Clear the rollout store
 
@@ -97,6 +96,11 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
 
     def get_arch(self, config: TRLConfig):
         """Get the model"""
+        if config.model.model_path == "openchat/openchat_3.5":
+            print("Using P3O, return Model-wrapper MistralModelWithHydraHead")
+            base_model = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
+            return MistralModelWithHydraHead(base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen)
+
         model_class = AutoModelForCausalLMWithHydraValueHead
         if config.model.model_arch_type == "seq2seq":
             model_class = AutoModelForSeq2SeqLMWithHydraValueHead
@@ -125,6 +129,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         old_logratios = batch.logratios.to(self.accelerator.device)
         rewards = batch.scalar_rewards.to(self.accelerator.device)
         num_responses_per_query = self.config.method.num_responses_per_query
+        print("num_responses_per_query:", num_responses_per_query)
 
         # if self.config.model.model_arch_type == "seq2seq":
         #     input_ids = query_tensors
@@ -156,7 +161,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         #     )
         # else:
         start = query_tensors.shape[1] - 1
-        tokens, attention_mask, position_ids, outputs, logits, ref_logits, logprobs, ref_logprobs, logratio= [], [], [], [], [], [], [], [], []
+        tokens, attention_mask, position_ids, outputs, logits, ref_logits, logprobs, ref_logprobs, logratio = [], [], [], [], [], [], [], [], []
         for i in range(num_responses_per_query):
             tokens.append(torch.cat((query_tensors, response_tensors[i]), dim=1))
             attention_mask.append(tokens[i].not_equal(self.tokenizer.pad_token_id).long().to(tokens[i].device))
@@ -261,39 +266,24 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             rollout_generate_time = time()
 
             # Generate samples from the language model (similar to using HuggingFace `generate` method)
-            samples = []
-            for _ in range(self.config.method.num_responses_per_query):
-                samples.append(self.generate(batch["input_ids"], batch["attention_mask"]))
-            len_max = max([samples[i].shape[1] for i in range(self.config.method.num_responses_per_query)])
-            for i in range(self.config.method.num_responses_per_query):
-                samples[i] = F.pad(
-                    samples[i],
-                    (0, len_max - samples[i].shape[1]),
-                    value=self.tokenizer.pad_token_id,
-                )
-            samples = torch.vstack(samples)
+            for k, v in batch.items():
+                batch[k] = torch.vstack([batch[k], batch[k]])  # double the prompts, as we want to generate 2 responses per prompt
+            samples = self.generate(batch["input_ids"], batch["attention_mask"])
             stats["time/rollout_generate"] = time() - rollout_generate_time
 
-            prompt_tensors = torch.vstack([batch.input_ids, batch.input_ids])
+            prompt_tensors = batch.input_ids
             device = samples.device
 
             prompt_sizes = torch.tensor([prompt_tensors.shape[1]] * len(prompt_tensors), device=device)
-            padded_samples = self.accelerator.pad_across_processes(
-                samples, dim=1, pad_index=self.tokenizer.eos_token_id, pad_first=False
-            )
-            padded_prompts = self.accelerator.pad_across_processes(
-                prompt_tensors, dim=1, pad_index=self.tokenizer.eos_token_id, pad_first=False
-            )
+            padded_samples = self.accelerator.pad_across_processes(samples, dim=1, pad_index=self.tokenizer.pad_token_id, pad_first=False)
+            padded_prompts = self.accelerator.pad_across_processes(prompt_tensors, dim=1, pad_index=self.tokenizer.pad_token_id, pad_first=False)
             gathered_samples = self.accelerator.gather(padded_samples)
             gathered_prompts = self.accelerator.gather(padded_prompts)
             gathered_prompt_sizes = self.accelerator.gather(prompt_sizes)
             metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
-            metadata["original_output"] += metadata["original_output"]
 
             if self.accelerator.is_main_process:
-                all_str_samples, all_str_prompts, all_str_outputs = self.decode(
-                    gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=True
-                )
+                all_str_samples, all_str_prompts, all_str_outputs = self.decode(gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False)
 
                 rollout_score_time = time()
                 # reward_fn should return list of rewards at each token per sample
@@ -305,12 +295,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
                     tokenizer=self.tokenizer,
                     **metadata,
                 )
-                all_scores = [
-                    torch.tensor(score, dtype=torch.float, device=device).view(
-                        -1,
-                    )
-                    for score in all_scores
-                ]
+                all_scores = [torch.tensor(score, dtype=torch.float, device=device).view(-1) for score in all_scores]
                 # Pad 0 reward on the ends
                 all_scores = pad_sequence(all_scores, batch_first=True, padding_value=-np.inf)
                 max_len = torch.tensor(all_scores.shape[1], dtype=torch.long, device=device)
@@ -356,9 +341,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
 
             # store statistics of the initial rollout as reference
             if self.ref_mean is None:
-                self.ref_mean, self.ref_std = (scores * scores_mask).sum(dim=1).mean(), (scores * scores_mask).sum(
-                    dim=1
-                ).std()
+                self.ref_mean, self.ref_std = (scores * scores_mask).sum(dim=1).mean(), (scores * scores_mask).sum(dim=1).std()
             all_scores_mean, all_scores_std = self.running_moments.update(torch.sum(scores * scores_mask, dim=1))
             stats["rollout_scores/mean"] = all_scores_mean.item()
             stats["rollout_scores/std"] = all_scores_std.item()
@@ -407,9 +390,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
                 position_ids = attention_mask.long().cumsum(-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 1)
                 with torch.no_grad():
-                    logits, *_, values = self.model(
-                        all_tokens, attention_mask=attention_mask, position_ids=position_ids
-                    )
+                    logits, *_, values = self.model(all_tokens, attention_mask=attention_mask, position_ids=position_ids)
                     # TODO(dahoas): When hydra model works need to also support generation on hydra head
                     if hasattr(self.model, "frozen_head") or self.model.peft_type:
                         ref_logits = self.model.forward_hydra(
@@ -446,14 +427,14 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
 
             log_ratio = (logprobs - ref_logprobs) * attention_mask[:, :-1]
             kl = log_ratio.exp() - 1 - log_ratio
-            mean_kl_per_token = kl.sum() / attention_mask[:, :-1].sum()
+            mean_kl_per_token = kl.sum() / max(attention_mask[:, :-1].sum(), 1)
             mean_kl = kl.sum(1).mean()
 
             logprobs = logprobs.cpu()
             ref_logprobs = ref_logprobs.cpu()
             prompt_tensors = prompt_tensors.cpu()
             sample_outputs = sample_outputs.cpu()
-            values = values.cpu()[:, :-1]
+            # values = values.cpu()[:, :-1]
 
             # Get the logprobs and values, for tokens that are not padding,
             # from the end of the prompt up to the <eos> token, while also including the latter
@@ -475,6 +456,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
                         scalar_rewards=scalar_rewards,
                     )
                 )
+                assert response_tensor.shape[0] == 2
 
                 rollout_count += 1
 

@@ -454,7 +454,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
 
             log_ratio = (logprobs - ref_logprobs) * attention_mask[:, :-1]
             kl = log_ratio.exp() - 1 - log_ratio
-            mean_kl_per_token = kl.mean()
+            mean_kl_per_token = kl.sum() / max(attention_mask[:, :-1].sum(), 1)
             mean_kl = kl.sum(1).mean()
 
             logprobs = logprobs.cpu()

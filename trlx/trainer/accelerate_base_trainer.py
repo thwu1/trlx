@@ -161,9 +161,9 @@ class AccelerateRLTrainer(BaseRLTrainer):
                 logger.warning("The argument num_layers_unfrozen is ignored when using peft, to prevent unexpected behaviour." "For Lora, use the `LoraConfig` argument `modules_to_save` instead.")
         for name, param in model.named_parameters():
             print(name, param.requires_grad)
-        print(model.base_model)
-        print(model.v_head)
-        print(model.frozen_head)
+        # print(model.base_model)
+        # print(model.v_head)
+        # print(model.frozen_head)
 
         return model
 
@@ -407,7 +407,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
                 logger.info("Computing KL divergence")
                 kl_per_sample = []
                 tokens_num = []
-                device = self.model.device
+                device = self.accelerator.device
                 with torch.no_grad():
                     for i_batch in range(math.ceil(len(all_samples) / self.config.train.batch_size)):
                         start = i_batch * self.config.train.batch_size
@@ -576,21 +576,27 @@ class AccelerateRLTrainer(BaseRLTrainer):
                 # We create a new dataloader (so new data ordering and shuffle) each inner epoch
                 train_dataloader = self.create_train_dataloader()
                 # For each batch
-                for minibatch in MiniBatchIterator(train_dataloader, self.mb_size, self.num_mb):
+                # for batch in train_dataloader:
+                #     print(batch)
+                # for minibatch in MiniBatchIterator(train_dataloader, self.mb_size, self.num_mb):
+                for minibatch in train_dataloader:
+                    # print("self.mb_size=", self.mb_size)
+                    # print("self.num_mb=", self.num_mb)
+                    # print(minibatch)
                     forward_time = 0.0
                     backward_time = 0.0
                     stats_accum = []
-                    for microbatch in minibatch:
-                        with self._accumulate():
-                            forward_time -= time()
-                            loss, stats = self.loss(microbatch)
-                            forward_time += time()
-                            backward_time -= time()
-                            self.model.train()
-                            self.accelerator.backward(loss)
-                            self.model.eval()
-                            backward_time += time()
-                            stats_accum.append(stats)
+                    # for microbatch in minibatch:
+                    with self._accumulate():
+                        forward_time -= time()
+                        loss, stats = self.loss(minibatch)
+                        forward_time += time()
+                        backward_time -= time()
+                        self.model.train()
+                        self.accelerator.backward(loss)
+                        self.model.eval()
+                        backward_time += time()
+                        stats_accum.append(stats)
 
                     forward_time /= self.num_mb
                     backward_time /= self.num_mb
