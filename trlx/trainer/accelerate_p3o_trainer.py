@@ -130,7 +130,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         old_logprobs = batch.logprobs.to(self.accelerator.device)
         rewards = batch.scalar_rewards.to(self.accelerator.device)
         num_responses_per_query = self.config.method.num_responses_per_query
-        print("num_responses_per_query:", num_responses_per_query)
+        # print("num_responses_per_query:", num_responses_per_query)
 
         # if self.config.model.model_arch_type == "seq2seq":
         #     input_ids = query_tensors
@@ -191,7 +191,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         )
 
         return loss, stats
-    
+
     def p3o_loss(
         self,
         logratio,
@@ -201,39 +201,50 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         old_logprobs,
         masks,
     ):
-        scale_q = False
-        kl_coef, cliprange_ratio, cliprange= self.config.method.kl_coef, self.config.method.cliprange_ratio, self.config.method.cliprange
+        kl_coef, cliprange_ratio, cliprange, clip_tokenwise, avg_tokenwise, scale_q = (
+            self.config.method.kl_coef,
+            self.config.method.cliprange_ratio,
+            self.config.method.cliprange,
+            self.config.method.clip_tokenwise,
+            self.config.method.avg_tokenwise,
+            self.config.method.scale_q,
+        )
         n = masks[0].sum() + masks[1].sum()
         q_diff = (rewards[0] - rewards[1] - kl_coef * (logratio[0] - logratio[1])).detach()
         if scale_q:
             q_diff = q_diff / torch.std(q_diff)
         ratio = torch.exp((logratio[0] - old_logratio[0]) + (logratio[1] - old_logratio[1])).detach()
         cliped_ratio_old = torch.clamp(ratio, 1 / cliprange_ratio, cliprange_ratio)
-        weights = (-q_diff * cliped_ratio_old.detach()).unsqueeze(-1)
-        print("weights:", weights)
-        # print("logratio[0]-logratio[1]:", logratio[0]-logratio[1])
-        # print("from_token:", torch.sum(logprobs[0]-logprobs[1], dim=1))
 
-        # loss1 = -q_diff * cliped_ratio_old.detach() * (logratio[0] - logratio[1]) / 2
-        # loss1_clip = (
-        #     -q_diff * cliped_ratio_old.detach() * torch.clamp(logratio[0] - logratio[1], old_logratio[0] - old_logratio[1] - self.cliprange, old_logratio[0] - old_logratio[1] + self.cliprange) / 2
-        # )
-        # loss = torch.max(loss1, loss1_clip).mean()
-        logprobs[0] = logprobs[0] * masks[0]
-        logprobs[1] = logprobs[1] * masks[1]
-        old_logprobs[0] = old_logprobs[0] * masks[0]
-        old_logprobs[1] = old_logprobs[1] * masks[1]
-        loss0 = weights * logprobs[0] # if there's problem it should be the dimension, since weigts is expected to be (bs,) and logprobs[0] is (bs, len)
-        loss1 = -weights * logprobs[1]
-        loss0_cl = weights * torch.clamp(logprobs[0], old_logprobs[0] - cliprange, old_logprobs[0] + cliprange)
-        loss1_cl = -weights * torch.clamp(logprobs[1], old_logprobs[1] - cliprange, old_logprobs[1] + cliprange)
-        loss = (torch.sum(torch.max(loss0, loss0_cl)) + torch.sum(torch.max(loss1, loss1_cl))) / n
+        if not clip_tokenwise:
+            loss1 = -q_diff * cliped_ratio_old.detach() * (logratio[0] - logratio[1])
+            loss1_clip = (
+                -q_diff
+                * cliped_ratio_old.detach()
+                * torch.clamp(logratio[0] - logratio[1], old_logratio[0] - old_logratio[1] - cliprange, old_logratio[0] - old_logratio[1] + cliprange)
+            )
+            if not avg_tokenwise:
+                loss = torch.max(loss1, loss1_clip).mean() / 2
+            else:
+                loss = torch.sum(torch.max(loss1, loss1_clip)) / n
+            policy_clipfrac = torch.sum((loss1_clip > loss1).float()) / loss1_clip.shape[0]
+        else:
+            weights = (-q_diff * cliped_ratio_old.detach()).unsqueeze(-1)
+            logprobs[0] = logprobs[0] * masks[0]
+            logprobs[1] = logprobs[1] * masks[1]
+            old_logprobs[0] = old_logprobs[0] * masks[0]
+            old_logprobs[1] = old_logprobs[1] * masks[1]
+            loss0 = weights * logprobs[0]
+            loss0_cl = weights * torch.clamp(logprobs[0], old_logprobs[0] - cliprange, old_logprobs[0] + cliprange)
+            loss1 = -weights * logprobs[1]
+            loss1_cl = -weights * torch.clamp(logprobs[1], old_logprobs[1] - cliprange, old_logprobs[1] + cliprange)
+            loss = (torch.sum(torch.max(loss0, loss0_cl)) + torch.sum(torch.max(loss1, loss1_cl))) / n
 
-        # log quantity of interest
+            # log quantity of interest
+            policy_clipfrac = (torch.sum((loss0_cl > loss0).float() * masks[0]) + torch.sum((loss1_cl > loss1).float() * masks[1])) / n
+
         logratio_chosen_mean = torch.mean(logratio[0] * (rewards[0] > rewards[1]).float() + logratio[1] * (rewards[1] > rewards[0]).float()).item()
         logratio_lose_mean = torch.mean(logratio[0] * (rewards[0] < rewards[1]).float() + logratio[1] * (rewards[1] < rewards[0]).float()).item()
-        # policy_clipfrac = torch.sum((loss1_clip > loss1).float()) / loss1_clip.shape[0]
-        policy_clipfrac = (torch.sum((loss0_cl > loss0).float() * masks[0]) + torch.sum((loss1_cl > loss1).float() * masks[1]))/n
 
         return loss, {
             "loss": loss.item(),
@@ -251,7 +262,6 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             "q_diff_mean": torch.mean(q_diff).item(),
             "q_diff_std": torch.std(q_diff).item(),
         }
-
 
     def setup_rollout_logging(self, config):
         # Make rollout logging dir for this run and store config

@@ -65,10 +65,26 @@ default_config = TRLConfig(
             top_p=1.0,
             do_sample=True,
         ),
+        clip_tokenwise=False,
+        avg_tokenwise=True,
+        scale_q=False,
     ),
 )
+"""
+old_version: 
+clip_tokenwise=False,
+avg_tokenwise=False,
 
-# accelerate launch --num_processes 2 --config_file ../../configs/accelerate/zero2-bf16.yaml mistral_p3o.py
+new_version:
+clip_tokenwise=True,
+avg_tokenwise=True/False, doesn't matter
+
+old_version(normalize loss tokenwise):
+clip_tokenwise=False,
+avg_tokenwise=True,
+"""
+
+# accelerate launch --num_processes 1 --config_file ../../configs/accelerate/zero2-bf16.yaml mistral_p3o.py
 # TODO: test the reward model (done)
 # implement reward template, need to substitute the special tokens with the reward template when evaluate (done)
 # dataset template (done)
@@ -158,7 +174,7 @@ def create_reward_fn():  # noqa:  C901
         # print(checkpoint, torch.load(checkpoint))
         reward_model.load_state_dict(torch.load(checkpoint), strict=False)
         reward_model.eval()
-        
+
         reward_model.requires_grad_(False)
         reward_device = torch.cuda.device_count() - 1
         reward_model = reward_model.to(reward_device)
@@ -195,7 +211,7 @@ def create_reward_fn():  # noqa:  C901
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train")
+    dataset = load_dataset("ThWu/cleaned_prompt_r", split="train")
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     dataset = dataset.map(from_list_to_openchat)
 

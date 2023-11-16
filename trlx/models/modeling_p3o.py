@@ -70,6 +70,9 @@ class P3OConfig(MethodConfig):
     gen_kwargs: dict
     gen_experience_kwargs: Optional[dict] = None
     num_value_layers_unfrozen: int = 0
+    clip_tokenwise: bool = False
+    avg_tokenwise: bool = True
+    scale_q: bool = False
 
     def loss(
         self,
