@@ -32,11 +32,13 @@ default_config = TRLConfig(
         seq_length=2048,
         epochs=10000,
         total_steps=10000,
-        batch_size=1,
+        batch_size=2,
         eval_batch_size=4,
         checkpoint_interval=500,
         eval_interval=500,
         pipeline="PromptPipeline",
+        save_best=True,
+        save_optimizer=False,
         trainer="AccelerateP3OTrainer",
         checkpoint_dir="checkpoints/p3o_hh",
     ),
@@ -48,8 +50,8 @@ default_config = TRLConfig(
         name="P3OConfig",
         num_responses_per_query=2,
         num_rollouts=32,
-        chunk_size=1,
-        p3o_epochs=4,
+        chunk_size=4,
+        p3o_epochs=2,
         kl_coef=0.01,
         cliprange=0.2,
         cliprange_ratio=10.0,
@@ -101,7 +103,7 @@ def create_reward_fn():  # noqa:  C901
             self.alpha = alpha
             self.v_head = nn.Linear(self.config.n_embd, 1, bias=False)
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-            print("Reward tokenizer eos token:", self.tokenizer.eos_token)
+            # print("Reward tokenizer eos token:", self.tokenizer.eos_token)
             # self.tokenizer.eos_token_id = eos_token_id
             self.tokenizer.pad_token = self.tokenizer.unk_token
             self.PAD_ID = self.tokenizer(self.tokenizer.pad_token)["input_ids"][0]
@@ -149,16 +151,18 @@ def create_reward_fn():  # noqa:  C901
 
     directory = snapshot_download("banghua/n_rm")
     for fpath in os.listdir(directory):
-        if fpath.endswith(".pt") or fpath.endswith(".bin"):
+        if fpath.endswith(".pt") or fpath.endswith("model.bin"):
             checkpoint = os.path.join(directory, fpath)
             break
-
-    reward_model.load_state_dict(torch.load(checkpoint), strict=False)
-    reward_model.eval()
-    reward_model.requires_grad_(False)
-    reward_device = torch.cuda.device_count() - 1
-    reward_model = reward_model.half().to(reward_device)
-    reward_batch_size = 4
+    if os.environ.get("LOCAL_RANK", "0") == "0":
+        # print(checkpoint, torch.load(checkpoint))
+        reward_model.load_state_dict(torch.load(checkpoint), strict=False)
+        reward_model.eval()
+        
+        reward_model.requires_grad_(False)
+        reward_device = torch.cuda.device_count() - 1
+        reward_model = reward_model.to(reward_device)
+        reward_batch_size = 2
 
     def get_reward(samples):
         """samples: List[str]"""
@@ -196,7 +200,7 @@ def main(hparams={}):
     dataset = dataset.map(from_list_to_openchat)
 
     prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
-    eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 280)]
+    eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 50)]
     reward_fn = create_reward_fn()
 
     trlx.train(
