@@ -127,6 +127,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         query_tensors = batch.query_tensors.to(self.accelerator.device)
         response_tensors = batch.response_tensors.to(self.accelerator.device)
         old_logratios = batch.logratios.to(self.accelerator.device)
+        old_logprobs = batch.logprobs.to(self.accelerator.device)
         rewards = batch.scalar_rewards.to(self.accelerator.device)
         num_responses_per_query = self.config.method.num_responses_per_query
         print("num_responses_per_query:", num_responses_per_query)
@@ -172,16 +173,85 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             ref_logits.append(self.model.forward_hydra(tokens[i], attention_mask[i], return_dict=True, position_ids=position_ids[i]).logits)
 
             logprobs.append(logprobs_of_labels(logits[i][:, :-1, :], tokens[i][:, 1:])[:, start:] * attention_mask[i][:, start:-1])
+            logprob_len = logprobs[i].shape[1]
+            old_logprobs[i] = old_logprobs[i][:, :logprob_len]
+            assert logprobs[i].shape == old_logprobs[i].shape
             ref_logprobs.append(logprobs_of_labels(ref_logits[i][:, :-1, :], tokens[i][:, 1:])[:, start:] * attention_mask[i][:, start:-1])
             logratio.append(logprobs[i] - ref_logprobs[i].detach())
 
-        loss, stats = self.config.method.loss(
+        start = query_tensors.shape[1] - 1
+
+        loss, stats = self.p3o_loss(
             logratio=[torch.sum(logratio[i], dim=1) for i in range(num_responses_per_query)],
             rewards=[rewards[i].detach() for i in range(num_responses_per_query)],
             old_logratio=[old_logratios[i].detach() for i in range(num_responses_per_query)],
+            logprobs=logprobs,
+            old_logprobs=old_logprobs,
+            masks=[attention_mask[i][:, start:-1] for i in range(num_responses_per_query)],
         )
 
         return loss, stats
+    
+    def p3o_loss(
+        self,
+        logratio,
+        rewards,
+        old_logratio,
+        logprobs,
+        old_logprobs,
+        masks,
+    ):
+        scale_q = False
+        kl_coef, cliprange_ratio, cliprange= self.config.method.kl_coef, self.config.method.cliprange_ratio, self.config.method.cliprange
+        n = masks[0].sum() + masks[1].sum()
+        q_diff = (rewards[0] - rewards[1] - kl_coef * (logratio[0] - logratio[1])).detach()
+        if scale_q:
+            q_diff = q_diff / torch.std(q_diff)
+        ratio = torch.exp((logratio[0] - old_logratio[0]) + (logratio[1] - old_logratio[1])).detach()
+        cliped_ratio_old = torch.clamp(ratio, 1 / cliprange_ratio, cliprange_ratio)
+        weights = (-q_diff * cliped_ratio_old.detach()).unsqueeze(-1)
+        print("weights:", weights)
+        # print("logratio[0]-logratio[1]:", logratio[0]-logratio[1])
+        # print("from_token:", torch.sum(logprobs[0]-logprobs[1], dim=1))
+
+        # loss1 = -q_diff * cliped_ratio_old.detach() * (logratio[0] - logratio[1]) / 2
+        # loss1_clip = (
+        #     -q_diff * cliped_ratio_old.detach() * torch.clamp(logratio[0] - logratio[1], old_logratio[0] - old_logratio[1] - self.cliprange, old_logratio[0] - old_logratio[1] + self.cliprange) / 2
+        # )
+        # loss = torch.max(loss1, loss1_clip).mean()
+        logprobs[0] = logprobs[0] * masks[0]
+        logprobs[1] = logprobs[1] * masks[1]
+        old_logprobs[0] = old_logprobs[0] * masks[0]
+        old_logprobs[1] = old_logprobs[1] * masks[1]
+        loss0 = weights * logprobs[0] # if there's problem it should be the dimension, since weigts is expected to be (bs,) and logprobs[0] is (bs, len)
+        loss1 = -weights * logprobs[1]
+        loss0_cl = weights * torch.clamp(logprobs[0], old_logprobs[0] - cliprange, old_logprobs[0] + cliprange)
+        loss1_cl = -weights * torch.clamp(logprobs[1], old_logprobs[1] - cliprange, old_logprobs[1] + cliprange)
+        loss = (torch.sum(torch.max(loss0, loss0_cl)) + torch.sum(torch.max(loss1, loss1_cl))) / n
+
+        # log quantity of interest
+        logratio_chosen_mean = torch.mean(logratio[0] * (rewards[0] > rewards[1]).float() + logratio[1] * (rewards[1] > rewards[0]).float()).item()
+        logratio_lose_mean = torch.mean(logratio[0] * (rewards[0] < rewards[1]).float() + logratio[1] * (rewards[1] < rewards[0]).float()).item()
+        # policy_clipfrac = torch.sum((loss1_clip > loss1).float()) / loss1_clip.shape[0]
+        policy_clipfrac = (torch.sum((loss0_cl > loss0).float() * masks[0]) + torch.sum((loss1_cl > loss1).float() * masks[1]))/n
+
+        return loss, {
+            "loss": loss.item(),
+            "reward_diff_mean": torch.mean(rewards[0] - rewards[1]).item(),
+            "reward_diff_abs": torch.mean(torch.abs(rewards[0] - rewards[1])).item(),
+            "reward_diff_std": torch.std(rewards[0] - rewards[1]).item(),
+            "logratio_chosen_mean": logratio_chosen_mean,
+            "logratio_lose_mean": logratio_lose_mean,
+            "logratio_gap_mean": logratio_chosen_mean - logratio_lose_mean,
+            "ratio_mean": ratio.mean().item(),
+            "ratio_max": ratio.max().item(),
+            "ratio_min": ratio.min().item(),
+            "policy_clipfrac": policy_clipfrac.item(),
+            "q_diff_abs_mean": torch.mean(torch.abs(q_diff)).item(),
+            "q_diff_mean": torch.mean(q_diff).item(),
+            "q_diff_std": torch.std(q_diff).item(),
+        }
+
 
     def setup_rollout_logging(self, config):
         # Make rollout logging dir for this run and store config
@@ -266,12 +336,15 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             rollout_generate_time = time()
 
             # Generate samples from the language model (similar to using HuggingFace `generate` method)
-            for k, v in batch.items():
-                batch[k] = torch.vstack([batch[k], batch[k]])  # double the prompts, as we want to generate 2 responses per prompt
-            samples = self.generate(batch["input_ids"], batch["attention_mask"])
+            # batch = {}
+            # for k, v in batch1.items():
+            #     batch[k] = torch.vstack([batch1[k], batch1[k]])  # double the prompts, as we want to generate 2 responses per prompt
+            prompt_tensors = torch.vstack([batch.input_ids, batch.input_ids])
+            attention_mask = torch.vstack([batch.attention_mask, batch.attention_mask])
+            samples = self.generate(prompt_tensors, attention_mask)
             stats["time/rollout_generate"] = time() - rollout_generate_time
 
-            prompt_tensors = batch.input_ids
+            # prompt_tensors = batch.input_ids
             device = samples.device
 
             prompt_sizes = torch.tensor([prompt_tensors.shape[1]] * len(prompt_tensors), device=device)
@@ -280,10 +353,12 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             gathered_samples = self.accelerator.gather(padded_samples)
             gathered_prompts = self.accelerator.gather(padded_prompts)
             gathered_prompt_sizes = self.accelerator.gather(prompt_sizes)
-            metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
+            # metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
 
             if self.accelerator.is_main_process:
-                all_str_samples, all_str_prompts, all_str_outputs = self.decode(gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False)
+                all_str_samples, all_str_prompts, all_str_outputs = self.decode(
+                    gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False
+                )
 
                 rollout_score_time = time()
                 # reward_fn should return list of rewards at each token per sample
@@ -293,16 +368,19 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
                     prompts=all_str_prompts,
                     outputs=all_str_outputs,
                     tokenizer=self.tokenizer,
-                    **metadata,
+                    # **metadata,
                 )
+                # print("373:", all_scores)
                 all_scores = [torch.tensor(score, dtype=torch.float, device=device).view(-1) for score in all_scores]
                 # Pad 0 reward on the ends
                 all_scores = pad_sequence(all_scores, batch_first=True, padding_value=-np.inf)
+                # print("377:", all_scores)
                 max_len = torch.tensor(all_scores.shape[1], dtype=torch.long, device=device)
 
                 stats["time/rollout_score"] = time() - rollout_score_time
 
                 all_scores = list(all_scores.reshape(self.accelerator.num_processes, -1, max_len).unbind())
+                # print("383:", all_scores)
             else:
                 all_scores = None
                 max_len = torch.tensor(0, dtype=torch.long, device=device)
@@ -367,7 +445,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
                         decoder_attention_mask=decoder_attention_mask,
                     )
                     logits = outputs.logits
-                    values = outputs.value
+                    # values = outputs.value
                     if hasattr(self.model, "frozen_head") or self.model.peft_type:
                         ref_logits = self.model.forward_hydra(
                             input_ids=prompt_tensors,
@@ -390,7 +468,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
                 position_ids = attention_mask.long().cumsum(-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 1)
                 with torch.no_grad():
-                    logits, *_, values = self.model(all_tokens, attention_mask=attention_mask, position_ids=position_ids)
+                    logits, *_ = self.model(all_tokens, attention_mask=attention_mask, position_ids=position_ids)
                     # TODO(dahoas): When hydra model works need to also support generation on hydra head
                     if hasattr(self.model, "frozen_head") or self.model.peft_type:
                         ref_logits = self.model.forward_hydra(
@@ -439,20 +517,24 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             # Get the logprobs and values, for tokens that are not padding,
             # from the end of the prompt up to the <eos> token, while also including the latter
             # (these are taken from the student model and not the reference model)
-            logratios = [log_ratio[ix, start:] for ix in range(n_samples)]
+            ends = start + attention_mask[:, start:].sum(1) + 1
+            logratios = [log_ratio[ix, start : ends[ix]] for ix in range(n_samples)]
+            all_logprobs = [logprobs[ix, start:] for ix in range(n_samples)]
 
             rollout_count = 0
 
             for sample_idx in range(n_samples // 2):
-                scalar_rewards = torch.tensor([scores[sample_idx].cpu(), scores[sample_idx + n_samples // 2].cpu()])
+                scalar_rewards = torch.tensor([scores[sample_idx][0].cpu(), scores[sample_idx + n_samples // 2][0].cpu()])
                 response_tensor = torch.stack([sample_outputs[sample_idx], sample_outputs[sample_idx + n_samples // 2]])
                 logratio_sum = torch.tensor([logratios[sample_idx].sum(), logratios[sample_idx + n_samples // 2].sum()])
+                logprobs_stack = torch.stack([all_logprobs[sample_idx], all_logprobs[sample_idx + n_samples // 2]])
                 assert torch.equal(prompt_tensors[sample_idx], prompt_tensors[sample_idx + n_samples // 2])
                 p3o_rl_elements.append(
                     P3ORLElement(
                         query_tensor=prompt_tensors[sample_idx],
                         response_tensor=response_tensor,
                         logratios=logratio_sum,
+                        logprobs=logprobs_stack,
                         scalar_rewards=scalar_rewards,
                     )
                 )

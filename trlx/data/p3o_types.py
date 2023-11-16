@@ -31,6 +31,7 @@ class P3ORLElement:
     query_tensor: TensorType["query_size"]
     response_tensor: TensorType["gen_nums", "response_size"]
     logratios: TensorType["gen_nums"]
+    logprobs: TensorType["gen_nums", "response_size"]
     scalar_rewards: TensorType["gen_nums"]
 
 
@@ -58,4 +59,5 @@ class P3ORLBatch:
     query_tensors: TensorType["batch_size", "query_size"]
     response_tensors: TensorType["gen_nums", "batch_size", "response_size"]
     logratios: TensorType["batch_size", "gen_nums"]
+    logprobs: TensorType["gen_nums", "batch_size", "response_size"]
     scalar_rewards: TensorType["gen_nums", "batch_size"]

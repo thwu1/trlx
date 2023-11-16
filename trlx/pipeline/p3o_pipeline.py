@@ -84,11 +84,17 @@ class P3ORolloutStorage(BaseRolloutStore):
                 batch_first=True,
             )
             pad_response_tensors = torch.stack([pad_response_tensors[:num_samples], pad_response_tensors[num_samples:]])
-
+            pad_logprobs = pad_sequence(
+                [elem.logprobs[0] for elem in elems] + [elem.logprobs[1] for elem in elems],
+                padding_value=0.0,
+                batch_first=True,
+            )
+            pad_logprobs = torch.stack([pad_logprobs[:num_samples], pad_logprobs[num_samples:]])
             return P3ORLBatch(
                 query_tensors,
                 pad_response_tensors,
                 torch.stack([elem.logratios for elem in elems]).transpose(0, 1),
+                pad_logprobs,
                 torch.stack([elem.scalar_rewards for elem in elems]).transpose(0, 1),
             )
 
