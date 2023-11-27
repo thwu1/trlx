@@ -141,7 +141,7 @@ class PPOConfig(MethodConfig):
         values: TensorType["batch_size", "response_size"],
         rewards: TensorType["batch_size", "response_size"],
         response_length: int,
-        use_whitening: Optional[bool] = True,
+        use_whitening: Optional[bool] = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Function that computes advantages and returns from rewards and values.
         Calculated as in the original PPO paper: https://arxiv.org/abs/1707.06347
@@ -208,32 +208,33 @@ class PPOConfig(MethodConfig):
         with torch.no_grad():
             approx_kl = torch.mean((ratio - 1) - log_ratio)
 
-        pg_loss1 = -advantages * ratio
-        pg_loss2 = -advantages * torch.clamp(
-            ratio,
-            1.0 - self.cliprange,
-            1.0 + self.cliprange,
-        )
-        pg_loss = torch.sum(torch.max(pg_loss1, pg_loss2) * mask) / n
-        pg_clipfrac = torch.sum((pg_loss2 > pg_loss1).float() * mask) / n
+        # pg_loss1 = -advantages * ratio
+        # pg_loss2 = -advantages * torch.clamp(
+        #    ratio,
+        #    1.0 - self.cliprange,
+        #     1.0 + self.cliprange,
+        # )
+        # pg_loss = torch.sum(torch.max(pg_loss1, pg_loss2) * mask) / n
+        # pg_clipfrac = torch.sum((pg_loss2 > pg_loss1).float() * mask) / n
 
-        loss = pg_loss + self.vf_coef * vf_loss
+        sq_loss = torch.sum(((logprobs - 10*advantages - old_logprobs.detach()) * mask) ** 2)  / n
+        loss = sq_loss + self.vf_coef * vf_loss
 
         stats = dict(
             losses=dict(
                 total_loss=loss.item(),
-                policy_loss=pg_loss.item(),
+                policy_loss=sq_loss.item(),
                 value_loss=vf_loss.item(),
             ),
             values=dict(
                 get_tensor_stats(values, mask, n),
                 values_error=torch.sum(((values - returns) * mask) ** 2) / n,
                 values_mape_error=torch.sum((abs(values - returns) * mask) / abs(returns * mask + 1e-2)) / n,
-                clipfrac=vf_clipfrac,
+                clipfrac=0,
             ),
             old_values=get_tensor_stats(old_values, mask, n),
             returns=get_tensor_stats(returns, mask, n),
-            policy=dict(approx_kl=approx_kl.item(), clipfrac=pg_clipfrac.item()),
+            policy=dict(approx_kl=approx_kl.item(), clipfrac=0),
             ratio=(ratio * mask).sum() / n,
             padding_percentage=1 - n / mask.numel(),
         )
