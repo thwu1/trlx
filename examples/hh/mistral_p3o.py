@@ -31,7 +31,7 @@ default_config = TRLConfig(
     train=TrainConfig(
         seq_length=2048,
         epochs=10000,
-        total_steps=10000,
+        total_steps=30000,
         batch_size=2,
         eval_batch_size=4,
         checkpoint_interval=500,
@@ -42,10 +42,10 @@ default_config = TRLConfig(
         trainer="AccelerateP3OTrainer",
         checkpoint_dir="checkpoints/p3o_hh",
     ),
-    model=ModelConfig(model_path="openchat/openchat_3.5", num_layers_unfrozen=4),
+    model=ModelConfig(model_path="openchat/openchat_3.5", num_layers_unfrozen=7),
     tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
-    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=5e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
-    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=5e-7)),
+    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=4e-8, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
+    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=4e-8)),
     method=P3OConfig(
         name="P3OConfig",
         num_responses_per_query=2,
@@ -66,7 +66,7 @@ default_config = TRLConfig(
             do_sample=True,
         ),
         clip_tokenwise=False,
-        avg_tokenwise=True,
+        avg_tokenwise=False,
         scale_q=False,
     ),
 )
@@ -178,7 +178,7 @@ def create_reward_fn():  # noqa:  C901
         reward_model.requires_grad_(False)
         reward_device = torch.cuda.device_count() - 1
         reward_model = reward_model.to(reward_device)
-        reward_batch_size = 2
+        reward_batch_size = 4
 
     def get_reward(samples):
         """samples: List[str]"""
@@ -212,11 +212,11 @@ def create_reward_fn():  # noqa:  C901
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
     dataset = load_dataset("ThWu/cleaned_prompt_r", split="train")
-    dataset = dataset.train_test_split(test_size=0.1, seed=42)
+    dataset = dataset.train_test_split(test_size=0.001, seed=42)
     dataset = dataset.map(from_list_to_openchat)
 
     prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
-    eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 50)]
+    eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 100)]
     reward_fn = create_reward_fn()
 
     trlx.train(
