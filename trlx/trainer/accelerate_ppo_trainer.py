@@ -19,7 +19,7 @@ from trlx.data.configs import TRLConfig
 from trlx.data.ppo_types import PPORLBatch, PPORLElement
 from trlx.models.modeling_ppo import (
     AdaptiveKLController,
-    MistralModelWithHydraValueHead,
+    # MistralModelWithHydraValueHead,
     AutoModelForCausalLMWithHydraValueHead,
     AutoModelForSeq2SeqLMWithHydraValueHead,
     FixedKLController,
@@ -107,10 +107,10 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
 
     def get_arch(self, config: TRLConfig):
         """Get the model"""
-        if config.model.model_path == "openchat/openchat_3.5":
-            print("Model is MistralModelWithHydraValueHead")
-            base_model = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
-            return MistralModelWithHydraValueHead(base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen)
+        # if config.model.model_path == "openchat/openchat_3.5":
+        #     print("Model is MistralModelWithHydraValueHead")
+        #     base_model = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
+        #     return MistralModelWithHydraValueHead(base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen)
 
         model_class = AutoModelForCausalLMWithHydraValueHead
         if config.model.model_arch_type == "seq2seq":

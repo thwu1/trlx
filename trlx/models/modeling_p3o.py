@@ -141,303 +141,303 @@ def make_value_branch(base_model, num_value_layers_unfrozen):
     return value_branch
 
 
-class MistralModelBranch(transformers.PreTrainedModel):
-    """
-    Take the last `num_layers_unfrozen` layers of the pretrained mistral model
-    """
+# class MistralModelBranch(transformers.PreTrainedModel):
+#     """
+#     Take the last `num_layers_unfrozen` layers of the pretrained mistral model
+#     """
 
-    def __init__(
-        self,
-        base_model: transformers.PreTrainedModel,
-        num_layers_unfrozen: int,
-    ):
-        super().__init__(base_model.config)
-        self.padding_idx = base_model.model.config.pad_token_id
-        self.vocab_size = base_model.model.config.vocab_size
+#     def __init__(
+#         self,
+#         base_model: transformers.PreTrainedModel,
+#         num_layers_unfrozen: int,
+#     ):
+#         super().__init__(base_model.config)
+#         self.padding_idx = base_model.model.config.pad_token_id
+#         self.vocab_size = base_model.model.config.vocab_size
 
-        self.embed_tokens = deepcopy(base_model.model.embed_tokens)
-        self.embed_tokens.requires_grad_(False)
-        self.layers = deepcopy(base_model.model.layers[-num_layers_unfrozen:])
-        self.norm = deepcopy(base_model.model.norm)
-        self.lm_head = deepcopy(base_model.lm_head)
-        self.gradient_checkpointing = False
+#         self.embed_tokens = deepcopy(base_model.model.embed_tokens)
+#         self.embed_tokens.requires_grad_(False)
+#         self.layers = deepcopy(base_model.model.layers[-num_layers_unfrozen:])
+#         self.norm = deepcopy(base_model.model.norm)
+#         self.lm_head = deepcopy(base_model.lm_head)
+#         self.gradient_checkpointing = False
 
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        hidden_states: torch.FloatTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
+#     def forward(
+#         self,
+#         input_ids: torch.LongTensor = None,
+#         hidden_states: torch.FloatTensor = None,
+#         attention_mask: Optional[torch.Tensor] = None,
+#         position_ids: Optional[torch.LongTensor] = None,
+#         past_key_values: Optional[List[torch.FloatTensor]] = None,
+#         inputs_embeds: Optional[torch.FloatTensor] = None,
+#         use_cache: Optional[bool] = None,
+#         output_attentions: Optional[bool] = None,
+#         output_hidden_states: Optional[bool] = None,
+#         return_dict: Optional[bool] = None,
+#     ) -> Union[Tuple, CausalLMOutputWithPast]:
+#         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+#         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+#         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+#         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # retrieve input_ids and inputs_embeds
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
-        elif input_ids is not None:
-            batch_size, seq_length = input_ids.shape
-        elif inputs_embeds is not None:
-            batch_size, seq_length, _ = inputs_embeds.shape
-        else:
-            raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
+#         # retrieve input_ids and inputs_embeds
+#         if input_ids is not None and inputs_embeds is not None:
+#             raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
+#         elif input_ids is not None:
+#             batch_size, seq_length = input_ids.shape
+#         elif inputs_embeds is not None:
+#             batch_size, seq_length, _ = inputs_embeds.shape
+#         else:
+#             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
-        seq_length_with_past = seq_length
-        past_key_values_length = 0
+#         seq_length_with_past = seq_length
+#         past_key_values_length = 0
 
-        if past_key_values is not None:
-            past_key_values_length = past_key_values[0][0].shape[2]
-            seq_length_with_past = seq_length_with_past + past_key_values_length
+#         if past_key_values is not None:
+#             past_key_values_length = past_key_values[0][0].shape[2]
+#             seq_length_with_past = seq_length_with_past + past_key_values_length
 
-        if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            position_ids = torch.arange(past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device)
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
-        else:
-            position_ids = position_ids.view(-1, seq_length).long()
+#         if position_ids is None:
+#             device = input_ids.device if input_ids is not None else inputs_embeds.device
+#             position_ids = torch.arange(past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device)
+#             position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
+#         else:
+#             position_ids = position_ids.view(-1, seq_length).long()
 
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+#         if inputs_embeds is None:
+#             inputs_embeds = self.embed_tokens(input_ids)
 
-        if attention_mask is not None and hasattr(self.config, "_flash_attn_2_enabled") and self.config._flash_attn_2_enabled and past_key_values is not None:
-            is_padding_right = attention_mask[:, -1].sum().item() != batch_size
-            if is_padding_right:
-                raise ValueError(
-                    "You are attempting to perform batched generation with padding_side='right'"
-                    " this may lead to unexpected behaviour for Flash Attention version of Mistral. Make sure to "
-                    " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
-                )
+#         if attention_mask is not None and hasattr(self.config, "_flash_attn_2_enabled") and self.config._flash_attn_2_enabled and past_key_values is not None:
+#             is_padding_right = attention_mask[:, -1].sum().item() != batch_size
+#             if is_padding_right:
+#                 raise ValueError(
+#                     "You are attempting to perform batched generation with padding_side='right'"
+#                     " this may lead to unexpected behaviour for Flash Attention version of Mistral. Make sure to "
+#                     " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
+#                 )
 
-        if getattr(self.config, "_flash_attn_2_enabled", False):
-            # 2d mask is passed through the layers
-            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-        else:
-            # 4d mask is passed through the layers
-            attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask,
-                (batch_size, seq_length),
-                inputs_embeds,
-                past_key_values_length,
-                sliding_window=self.config.sliding_window,
-            )
+#         if getattr(self.config, "_flash_attn_2_enabled", False):
+#             # 2d mask is passed through the layers
+#             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+#         else:
+#             # 4d mask is passed through the layers
+#             attention_mask = _prepare_4d_causal_attention_mask(
+#                 attention_mask,
+#                 (batch_size, seq_length),
+#                 inputs_embeds,
+#                 past_key_values_length,
+#                 sliding_window=self.config.sliding_window,
+#             )
 
-        # hidden_states = inputs_embeds
+#         # hidden_states = inputs_embeds
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                print("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
-                use_cache = False
+#         if self.gradient_checkpointing and self.training:
+#             if use_cache:
+#                 print("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
+#                 use_cache = False
 
-        # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = () if use_cache else None
+#         # decoder layers
+#         all_hidden_states = () if output_hidden_states else None
+#         all_self_attns = () if output_attentions else None
+#         next_decoder_cache = () if use_cache else None
 
-        for idx, decoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+#         for idx, decoder_layer in enumerate(self.layers):
+#             if output_hidden_states:
+#                 all_hidden_states += (hidden_states,)
 
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
+#             past_key_value = past_key_values[idx] if past_key_values is not None else None
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                    past_key_value,
-                    output_attentions,
-                    use_cache,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                )
+#             if self.gradient_checkpointing and self.training:
+#                 layer_outputs = self._gradient_checkpointing_func(
+#                     decoder_layer.__call__,
+#                     hidden_states,
+#                     attention_mask,
+#                     position_ids,
+#                     past_key_value,
+#                     output_attentions,
+#                     use_cache,
+#                 )
+#             else:
+#                 layer_outputs = decoder_layer(
+#                     hidden_states,
+#                     attention_mask=attention_mask,
+#                     position_ids=position_ids,
+#                     past_key_value=past_key_value,
+#                     output_attentions=output_attentions,
+#                     use_cache=use_cache,
+#                 )
 
-            hidden_states = layer_outputs[0]
+#             hidden_states = layer_outputs[0]
 
-            if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+#             if use_cache:
+#                 next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
 
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+#             if output_attentions:
+#                 all_self_attns += (layer_outputs[1],)
 
-        hidden_states = self.norm(hidden_states)
+#         hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+#         # add hidden states from the last decoder layer
+#         if output_hidden_states:
+#             all_hidden_states += (hidden_states,)
 
-        next_cache = next_decoder_cache if use_cache else None
-        if not return_dict:
-            outputs = tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-        else:
-            outputs = BaseModelOutputWithPast(
-                last_hidden_state=hidden_states,
-                past_key_values=next_cache,
-                hidden_states=all_hidden_states,
-                attentions=all_self_attns,
-            )
+#         next_cache = next_decoder_cache if use_cache else None
+#         if not return_dict:
+#             outputs = tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+#         else:
+#             outputs = BaseModelOutputWithPast(
+#                 last_hidden_state=hidden_states,
+#                 past_key_values=next_cache,
+#                 hidden_states=all_hidden_states,
+#                 attentions=all_self_attns,
+#             )
 
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()
+#         logits = self.lm_head(hidden_states)
+#         logits = logits.float()
 
-        if not return_dict:
-            return (logits,) + outputs[1:]
+#         if not return_dict:
+#             return (logits,) + outputs[1:]
 
-        return CausalLMOutputWithPast(
-            loss=None,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+#         return CausalLMOutputWithPast(
+#             loss=None,
+#             logits=logits,
+#             past_key_values=outputs.past_key_values,
+#             hidden_states=outputs.hidden_states,
+#             attentions=outputs.attentions,
+#         )
 
 
-class MistralModelWithHydraHead(PreTrainedModelWrapper):
-    """An `AutoModel` class wrapper for `transformers` causal models that have a
-    language modeling head and a value head
-    """
+# class MistralModelWithHydraHead(PreTrainedModelWrapper):
+#     """An `AutoModel` class wrapper for `transformers` causal models that have a
+#     language modeling head and a value head
+#     """
 
-    def __init__(
-        self,
-        base_model: transformers.PreTrainedModel,
-        peft_config=None,
-        num_layers_unfrozen=0,
-    ):
-        super().__init__(base_model, peft_config=peft_config)
-        self.num_layers_unfrozen = num_layers_unfrozen
-        # self.v_head = make_mistral_value_branch(base_model, num_layers_unfrozen)
-        self.v_head = None
-        self.frozen_head = MistralModelBranch(base_model, num_layers_unfrozen)
-        for param in self.frozen_head.parameters():
-            param.requires_grad = False
-        self.frozen_head = self.frozen_head.eval()
+#     def __init__(
+#         self,
+#         base_model: transformers.PreTrainedModel,
+#         peft_config=None,
+#         num_layers_unfrozen=0,
+#     ):
+#         super().__init__(base_model, peft_config=peft_config)
+#         self.num_layers_unfrozen = num_layers_unfrozen
+#         # self.v_head = make_mistral_value_branch(base_model, num_layers_unfrozen)
+#         self.v_head = None
+#         self.frozen_head = MistralModelBranch(base_model, num_layers_unfrozen)
+#         for param in self.frozen_head.parameters():
+#             param.requires_grad = False
+#         self.frozen_head = self.frozen_head.eval()
 
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        position_ids: Optional[List[torch.FloatTensor]] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        ignore_peft_adapter: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithValue]:
-        forward_kwargs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "output_hidden_states": True,
-            "return_dict": True,
-        }
+#     def forward(
+#         self,
+#         input_ids: torch.LongTensor = None,
+#         attention_mask: Optional[torch.Tensor] = None,
+#         past_key_values: Optional[List[torch.FloatTensor]] = None,
+#         position_ids: Optional[List[torch.FloatTensor]] = None,
+#         head_mask: Optional[torch.Tensor] = None,
+#         inputs_embeds: Optional[torch.FloatTensor] = None,
+#         use_cache: Optional[bool] = None,
+#         output_attentions: Optional[bool] = None,
+#         output_hidden_states: Optional[bool] = None,
+#         return_dict: Optional[bool] = None,
+#         ignore_peft_adapter: Optional[bool] = None,
+#     ) -> Union[Tuple, CausalLMOutputWithValue]:
+#         forward_kwargs = {
+#             "input_ids": input_ids,
+#             "attention_mask": attention_mask,
+#             "position_ids": position_ids,
+#             "output_hidden_states": True,
+#             "return_dict": True,
+#         }
 
-        outputs = self.base_model(**forward_kwargs)
-        forward_kwargs["hidden_states"] = outputs["hidden_states"][-(self.num_layers_unfrozen + 1)]
-        forward_kwargs.pop("return_dict", None)
-        # value = self.v_head(**forward_kwargs).logits.squeeze(-1)
-        value = None
-        if not return_dict:
-            outputs = (outputs.logits,) + outputs[1:] + (value,)
-            return outputs
+#         outputs = self.base_model(**forward_kwargs)
+#         forward_kwargs["hidden_states"] = outputs["hidden_states"][-(self.num_layers_unfrozen + 1)]
+#         forward_kwargs.pop("return_dict", None)
+#         # value = self.v_head(**forward_kwargs).logits.squeeze(-1)
+#         value = None
+#         if not return_dict:
+#             outputs = (outputs.logits,) + outputs[1:] + (value,)
+#             return outputs
 
-        return CausalLMOutputWithValue(**outputs, value=value)
+#         return CausalLMOutputWithValue(**outputs, value=value)
 
-    def forward_hydra(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        position_ids: Optional[List[torch.FloatTensor]] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[torch.FloatTensor, CausalLMOutputWithValue]:
-        forward_kwargs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "output_hidden_states": True,
-            "return_dict": True,
-        }
-        outputs = self.forward(**forward_kwargs)
-        forward_kwargs["hidden_states"] = outputs["hidden_states"][-(self.num_layers_unfrozen + 1)]
-        hydra_outputs = self.frozen_head(**forward_kwargs)
+#     def forward_hydra(
+#         self,
+#         input_ids: torch.LongTensor = None,
+#         attention_mask: Optional[torch.Tensor] = None,
+#         past_key_values: Optional[List[torch.FloatTensor]] = None,
+#         position_ids: Optional[List[torch.FloatTensor]] = None,
+#         head_mask: Optional[torch.Tensor] = None,
+#         inputs_embeds: Optional[torch.FloatTensor] = None,
+#         use_cache: Optional[bool] = None,
+#         output_attentions: Optional[bool] = None,
+#         output_hidden_states: Optional[bool] = None,
+#         return_dict: Optional[bool] = None,
+#     ) -> Union[torch.FloatTensor, CausalLMOutputWithValue]:
+#         forward_kwargs = {
+#             "input_ids": input_ids,
+#             "attention_mask": attention_mask,
+#             "position_ids": position_ids,
+#             "output_hidden_states": True,
+#             "return_dict": True,
+#         }
+#         outputs = self.forward(**forward_kwargs)
+#         forward_kwargs["hidden_states"] = outputs["hidden_states"][-(self.num_layers_unfrozen + 1)]
+#         hydra_outputs = self.frozen_head(**forward_kwargs)
 
-        if not return_dict:
-            return hydra_outputs.logits
-        return hydra_outputs
+#         if not return_dict:
+#             return hydra_outputs.logits
+#         return hydra_outputs
 
-    def generate(self, *args, **kwargs) -> Union[ModelOutput, torch.LongTensor]:
-        return self.base_model.generate(*args, **kwargs)
+#     def generate(self, *args, **kwargs) -> Union[ModelOutput, torch.LongTensor]:
+#         return self.base_model.generate(*args, **kwargs)
 
-    def state_dict(self, *args, heads_only=False, **kwargs):
-        """
-        Returns the state dictionary of the model. We add the state dictionary of the value head
-        to the state dictionary of the wrapped model by prepending the key with `v_head.`.
-        """
-        # state_dict = self.v_head.state_dict(*args, **dict(prefix="v_head.", **kwargs))
-        state_dict = {}
-        if not heads_only:
-            state_dict = {
-                **state_dict,
-                **self.base_model.state_dict(*args, **dict(prefix="" if self.peft_type else "base_model.", **kwargs)),
-            }
+#     def state_dict(self, *args, heads_only=False, **kwargs):
+#         """
+#         Returns the state dictionary of the model. We add the state dictionary of the value head
+#         to the state dictionary of the wrapped model by prepending the key with `v_head.`.
+#         """
+#         # state_dict = self.v_head.state_dict(*args, **dict(prefix="v_head.", **kwargs))
+#         state_dict = {}
+#         if not heads_only:
+#             state_dict = {
+#                 **state_dict,
+#                 **self.base_model.state_dict(*args, **dict(prefix="" if self.peft_type else "base_model.", **kwargs)),
+#             }
 
-            if self.frozen_head:
-                state_dict = {
-                    **state_dict,
-                    **self.frozen_head.state_dict(*args, **dict(prefix="frozen_head.", **kwargs)),
-                }
+#             if self.frozen_head:
+#                 state_dict = {
+#                     **state_dict,
+#                     **self.frozen_head.state_dict(*args, **dict(prefix="frozen_head.", **kwargs)),
+#                 }
 
-        return state_dict
+#         return state_dict
 
-    def post_init(self, state_dict):
-        """
-        Load `state_dict` into the model. If peft was used to train the model,
-        only the value head would be present in the loaded `state_dict`, so the
-        loading has to be not strict. Also `frozen_head` will be recreated and
-        loaded from the checkpoint, to comply with deepspeed checkpoint loading.
-        """
-        strict = not self.peft_type and any(k.startswith("base_model.") or k.startswith("v_head.") for k in state_dict)
+#     def post_init(self, state_dict):
+#         """
+#         Load `state_dict` into the model. If peft was used to train the model,
+#         only the value head would be present in the loaded `state_dict`, so the
+#         loading has to be not strict. Also `frozen_head` will be recreated and
+#         loaded from the checkpoint, to comply with deepspeed checkpoint loading.
+#         """
+#         strict = not self.peft_type and any(k.startswith("base_model.") or k.startswith("v_head.") for k in state_dict)
 
-        # if not self.peft_type and self.frozen_head is None:
-        #     for k in state_dict:
-        #         match = re.search(r"^frozen_head\..+\.(\d+)\.", k)
-        #         if match:
-        #             self.num_layers_unfrozen = max(self.num_layers_unfrozen, int(match.group(1)) + 1)
+#         # if not self.peft_type and self.frozen_head is None:
+#         #     for k in state_dict:
+#         #         match = re.search(r"^frozen_head\..+\.(\d+)\.", k)
+#         #         if match:
+#         #             self.num_layers_unfrozen = max(self.num_layers_unfrozen, int(match.group(1)) + 1)
 
-        #     config = self.base_model.config
-        #     branch_class = hf_get_branch_class(config)
-        #     self.frozen_head = branch_class(
-        #         self.base_model,
-        #         num_layers_unfrozen=self.num_layers_unfrozen,
-        #     ).eval()
+#         #     config = self.base_model.config
+#         #     branch_class = hf_get_branch_class(config)
+#         #     self.frozen_head = branch_class(
+#         #         self.base_model,
+#         #         num_layers_unfrozen=self.num_layers_unfrozen,
+#         #     ).eval()
 
-        self.load_state_dict(state_dict, strict=strict)
-        del state_dict
-        gc.collect()  # noqa: E702
+#         self.load_state_dict(state_dict, strict=strict)
+#         del state_dict
+#         gc.collect()  # noqa: E702
 
 
 class AutoModelForCausalLMWithValueHead(PreTrainedModelWrapper):
@@ -457,7 +457,8 @@ class AutoModelForCausalLMWithValueHead(PreTrainedModelWrapper):
     ):
         super().__init__(base_model, peft_config=peft_config)
         self.num_value_layers_unfrozen = num_value_layers_unfrozen
-        self.v_head = make_value_branch(base_model, num_value_layers_unfrozen)
+        # self.v_head = make_value_branch(base_model, num_value_layers_unfrozen)
+        self.v_head = None
 
     def forward(
         self,
@@ -511,15 +512,17 @@ class AutoModelForCausalLMWithValueHead(PreTrainedModelWrapper):
             forward_kwargs.pop("input_ids", None)
             forward_kwargs.pop("inputs_embeds", None)
             forward_kwargs["return_dict"] = False
-            value = self.v_head(
-                outputs.hidden_states[-(self.num_value_layers_unfrozen + 1)],
-                output_shape=output_shape,
-                **forward_kwargs,
-            )[
-                0
-            ].squeeze(-1)
+            # value = self.v_head(
+            #     outputs.hidden_states[-(self.num_value_layers_unfrozen + 1)],
+            #     output_shape=output_shape,
+            #     **forward_kwargs,
+            # )[
+            #     0
+            # ].squeeze(-1)
+            value = None
         else:
-            value = self.v_head(outputs.hidden_states[-(self.num_value_layers_unfrozen + 1)]).squeeze(-1)
+            # value = self.v_head(outputs.hidden_states[-(self.num_value_layers_unfrozen + 1)]).squeeze(-1)
+            value = None
 
         if not return_dict:
             outputs = (outputs.logits,) + outputs[1:] + (value,)
@@ -535,7 +538,8 @@ class AutoModelForCausalLMWithValueHead(PreTrainedModelWrapper):
         Returns the state dictionary of the model. We add the state dictionary of the value head
         to the state dictionary of the wrapped model by prepending the key with `v_head.`.
         """
-        state_dict = self.v_head.state_dict(*args, **dict(prefix="v_head.", **kwargs))
+        # state_dict = self.v_head.state_dict(*args, **dict(prefix="v_head.", **kwargs))
+        state_dict = {}
         if not heads_only:
             state_dict = {**state_dict, **self.base_model.state_dict(*args, **dict(prefix="base_model.", **kwargs))}
 
@@ -634,7 +638,8 @@ class AutoModelForCausalLMWithHydraValueHead(AutoModelForCausalLMWithValueHead):
         Returns the state dictionary of the model. We add the state dictionary of the value head
         to the state dictionary of the wrapped model by prepending the key with `v_head.`.
         """
-        state_dict = self.v_head.state_dict(*args, **dict(prefix="v_head.", **kwargs))
+        # state_dict = self.v_head.state_dict(*args, **dict(prefix="v_head.", **kwargs))
+        state_dict = {}
         if not heads_only:
             state_dict = {
                 **state_dict,
