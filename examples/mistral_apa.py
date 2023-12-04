@@ -5,12 +5,10 @@ import sys
 from itertools import islice
 
 import torch
-import tritonclient.grpc as client_util
 from datasets import load_dataset
 from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from tritonclient.utils import np_to_triton_dtype
 from utils import from_openchat_to_llama, from_list_to_openchat
 
 import trlx
@@ -155,7 +153,7 @@ def create_reward_fn():  # noqa:  C901
         if fpath.endswith(".pt") or fpath.endswith("model.bin"):
             checkpoint = os.path.join(directory, fpath)
             break
-   
+
     reward_model.load_state_dict(torch.load(checkpoint), strict=False)
     reward_model.eval()
     reward_model.requires_grad_(False)
@@ -165,6 +163,7 @@ def create_reward_fn():  # noqa:  C901
         reward_batch_size = 4
     else:
         del reward_model
+
     def get_reward(samples):
         """samples: List[str]"""
         input_ids = []

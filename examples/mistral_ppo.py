@@ -5,12 +5,10 @@ import sys
 from itertools import islice
 
 import torch
-import tritonclient.grpc as client_util
 from datasets import load_dataset
 from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from tritonclient.utils import np_to_triton_dtype
 from utils import from_openchat_to_llama, from_list_to_openchat
 from peft import LoraConfig, TaskType
 
