@@ -10,12 +10,6 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-from trlx.data.ilql_types import (
-    ILQLBatch,
-    ILQLElement,
-    ILQLSeq2SeqBatch,
-    ILQLSeq2SeqElement,
-)
 from trlx.pipeline import BasePipeline, BaseRolloutStore, register_datapipeline
 
 
@@ -53,8 +47,7 @@ def tokenize_dialogue(  # noqa: C901
         dialogue[-1] = dialogue[-1] + tokenizer.eos_token
 
     tokenized = [
-        DialogMessage(is_output=i % 2 == 1, tokens=tuple(tokenizer(dialogue[i], add_special_tokens=False).input_ids))
-        for i in range(len(dialogue))
+        DialogMessage(is_output=i % 2 == 1, tokens=tuple(tokenizer(dialogue[i], add_special_tokens=False).input_ids)) for i in range(len(dialogue))
     ]
 
     # flip to truncate from the left
@@ -64,10 +57,7 @@ def tokenize_dialogue(  # noqa: C901
     # truncate if necessary
     lengths = [len(t.tokens) for t in tokenized]
     cumsum_lengths = [sum(lengths[:i]) for i in range(len(lengths))]
-    truncated = [
-        DialogMessage(is_output=t.is_output, tokens=t.tokens[: max(max_length - cl, 0)])
-        for t, cl in zip(tokenized, cumsum_lengths)
-    ]
+    truncated = [DialogMessage(is_output=t.is_output, tokens=t.tokens[: max(max_length - cl, 0)]) for t, cl in zip(tokenized, cumsum_lengths)]
 
     # flip back if was fliped to left truncate
     if tokenizer.truncation_side == "left":
@@ -94,20 +84,14 @@ class DialogStore(BaseRolloutStore):
         attention_masks = [torch.ones(sum(len(m.tokens) for m in d), dtype=torch.bool) for d in dialogs]
         input_ids = [torch.tensor([t for m in d for t in m.tokens], dtype=torch.long) for d in dialogs]
         # -100 is the ignore index for CrossEntropyLoss
-        labels = [
-            torch.tensor([t if m.is_output else -100 for m in d for t in m.tokens], dtype=torch.long) for d in dialogs
-        ]
-        self.history = [
-            dict(input_ids=i, attention_mask=a, labels=l) for i, a, l in zip(input_ids, attention_masks, labels)
-        ]
+        labels = [torch.tensor([t if m.is_output else -100 for m in d for t in m.tokens], dtype=torch.long) for d in dialogs]
+        self.history = [dict(input_ids=i, attention_mask=a, labels=l) for i, a, l in zip(input_ids, attention_masks, labels)]
 
     def create_loader(self, batch_size: int, shuffle=False) -> DataLoader:
         hf_collate_fn = DataCollatorWithPadding(self.tokenizer)
 
         def collate_fn(elems: Iterable[dict]):
-            batch = hf_collate_fn(
-                {"input_ids": [e["input_ids"] for e in elems], "attention_mask": [e["attention_mask"] for e in elems]}
-            )
+            batch = hf_collate_fn({"input_ids": [e["input_ids"] for e in elems], "attention_mask": [e["attention_mask"] for e in elems]})
             labels = hf_collate_fn([{"input_ids": e["labels"]} for e in elems])["input_ids"]
             batch["labels"] = labels
             return batch
@@ -146,17 +130,14 @@ class PromptPipeline(BasePipeline):
         else:
             metadata = [{}] * len(prompts)
 
-        model_inputs = tokenizer(
-            prompts, truncation=True, padding=False, max_length=max_prompt_length, add_special_tokens=add_special_tokens
-        )
+        model_inputs = tokenizer(prompts, truncation=True, padding=False, max_length=max_prompt_length, add_special_tokens=add_special_tokens)
 
         prompts_tokens = model_inputs["input_ids"]
         attention_mask = model_inputs["attention_mask"]
 
         self.tokenizer = tokenizer
         self.prompts = [
-            {"input_ids": tokens, "attention_mask": mask, **metadata}
-            for tokens, mask, metadata in zip(prompts_tokens, attention_mask, metadata)
+            {"input_ids": tokens, "attention_mask": mask, **metadata} for tokens, mask, metadata in zip(prompts_tokens, attention_mask, metadata)
         ]
 
     def __getitem__(self, ix: int):
@@ -185,105 +166,4 @@ class PromptPipeline(BasePipeline):
             sampler=sampler,
             num_workers=0,
             drop_last=drop_last,
-        )
-
-
-def ilql_collate_fn(elems: Iterable[ILQLElement]):
-    return ILQLBatch(
-        pad_sequence([x.input_ids for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.attention_mask for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.rewards for x in elems], batch_first=True, padding_value=0.0),
-        pad_sequence([x.states_ixs for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.actions_ixs for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.dones for x in elems], batch_first=True, padding_value=0),
-    )
-
-
-class ILQLRolloutStorage(BaseRolloutStore):
-    """
-    Rollout storage for training ILQL
-    """
-
-    def __init__(self, input_ids, attention_mask, rewards, states_ixs, actions_ixs, dones):
-        super().__init__()
-
-        self.input_ids = input_ids
-        self.attention_mask = attention_mask
-        self.rewards = rewards
-        self.states_ixs = states_ixs
-        self.actions_ixs = actions_ixs
-        self.dones = dones
-
-    def __getitem__(self, ix: int) -> ILQLElement:
-        return ILQLElement(
-            self.input_ids[ix],
-            self.attention_mask[ix],
-            self.rewards[ix],
-            self.states_ixs[ix],
-            self.actions_ixs[ix],
-            self.dones[ix],
-        )
-
-    def __len__(self) -> int:
-        return len(self.input_ids)
-
-    def create_loader(self, batch_size: int):
-        return DataLoader(
-            self,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=ilql_collate_fn,
-            drop_last=torch.distributed.is_initialized(),
-        )
-
-
-def ilql_seq2seq_collate_fn(elems: Iterable[ILQLElement]):
-    return ILQLSeq2SeqBatch(
-        pad_sequence([x.input_ids for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.attention_mask for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.decoder_input_ids for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.rewards for x in elems], batch_first=True, padding_value=0.0),
-        pad_sequence([x.states_ixs for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.actions_ixs for x in elems], batch_first=True, padding_value=0),
-        pad_sequence([x.dones for x in elems], batch_first=True, padding_value=0),
-    )
-
-
-class ILQLSeq2SeqRolloutStorage(BaseRolloutStore):
-    """
-    Rollout storage for training ILQL with Seq2Seq models
-    """
-
-    def __init__(self, input_ids, attention_mask, decoder_input_ids, rewards, states_ixs, actions_ixs, dones):
-        super().__init__()
-
-        self.input_ids = input_ids
-        self.attention_mask = attention_mask
-        self.decoder_input_ids = decoder_input_ids
-        self.rewards = rewards
-        self.states_ixs = states_ixs
-        self.actions_ixs = actions_ixs
-        self.dones = dones
-
-    def __getitem__(self, ix: int) -> ILQLElement:
-        return ILQLSeq2SeqElement(
-            self.input_ids[ix],
-            self.attention_mask[ix],
-            self.decoder_input_ids[ix],
-            self.rewards[ix],
-            self.states_ixs[ix],
-            self.actions_ixs[ix],
-            self.dones[ix],
-        )
-
-    def __len__(self) -> int:
-        return len(self.input_ids)
-
-    def create_loader(self, batch_size: int):
-        return DataLoader(
-            self,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=ilql_seq2seq_collate_fn,
-            drop_last=torch.distributed.is_initialized(),
         )

@@ -4,7 +4,6 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from trlx.data.configs import TRLConfig
 from trlx.data.default_configs import (
-    default_ilql_config,
     default_ppo_config,
     default_sft_config,
     default_p3o_config,
@@ -70,14 +69,9 @@ def train(  # noqa: C901
             encounter in them. Generations will not contain them and also will also be right-stripped.
     """
     if config is None:
-        warnings.warn(
-            "Passing the `config` argument implicitly is depreciated, use or"
-            "adapt some from `trlx/data/default_configs.py` instead"
-        )
+        warnings.warn("Passing the `config` argument implicitly is depreciated, use or" "adapt some from `trlx/data/default_configs.py` instead")
         if reward_fn:
             config = default_ppo_config()
-        elif rewards:
-            config = default_ilql_config()
         else:
             config = default_sft_config()
 
