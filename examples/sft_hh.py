@@ -2,7 +2,7 @@ import json
 import sys
 
 from datasets import load_dataset
-from ppo_hh import create_reward_fn
+from mistral_ppo import create_reward_fn
 
 import trlx
 from trlx.data.default_configs import (
