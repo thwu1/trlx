@@ -19,7 +19,6 @@ from trlx.data.configs import TRLConfig
 from trlx.data.ppo_types import PPORLBatch, PPORLElement
 from trlx.models.modeling_ppo import (
     AdaptiveKLController,
-    # MistralModelWithHydraValueHead,
     AutoModelForCausalLMWithHydraValueHead,
     AutoModelForSeq2SeqLMWithHydraValueHead,
     FixedKLController,
@@ -300,7 +299,9 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
 
             if self.accelerator.is_main_process:
-                all_str_samples, all_str_prompts, all_str_outputs = self.decode(gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False)
+                all_str_samples, all_str_prompts, all_str_outputs = self.decode(
+                    gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False
+                )
                 # print("all_str_samples:", all_str_samples)
                 # print("all_str_prompts:", all_str_prompts)
                 # print("all_str_outputs:", all_str_outputs)

@@ -1,5 +1,6 @@
 import contextlib
 import json
+import math
 import os
 import sys
 from abc import abstractmethod
@@ -9,7 +10,6 @@ from typing import Dict, List, Optional, Tuple
 
 import ray
 import torch
-import math
 from accelerate import Accelerator  # type: ignore
 from ray.air import session
 from rich.console import Console
@@ -69,9 +69,7 @@ class AccelerateRLTrainer(BaseRLTrainer):
         self.opt = self.setup_optimizer()
         self.scheduler = self.setup_scheduler()
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            config.tokenizer.tokenizer_path, **config.tokenizer.tokenizer_extra_configs
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(config.tokenizer.tokenizer_path, **config.tokenizer.tokenizer_extra_configs)
         self.tokenizer.padding_side = config.tokenizer.padding_side
         self.tokenizer.truncation_side = config.tokenizer.truncation_side
         self.tokenizer.sep_token = "<sep>"
@@ -132,7 +130,10 @@ class AccelerateRLTrainer(BaseRLTrainer):
             elif config.train.tracker is None:
                 self.accelerator.init_trackers(project_name=self.config.train.project_name)
             else:
-                raise ValueError(f"Only supported trackers are `wandb` and `tensorboard`. Got: `{config.train.tracker}`. " "Set `tracker` to `None` to disable tracking.")
+                raise ValueError(
+                    f"Only supported trackers are `wandb` and `tensorboard`. Got: `{config.train.tracker}`. "
+                    "Set `tracker` to `None` to disable tracking."
+                )
 
         self.nth_evaluation = 0
         self.generate_sweep_kwarg = None
@@ -162,12 +163,12 @@ class AccelerateRLTrainer(BaseRLTrainer):
             if self.accelerator.is_main_process and hasattr(model.base_model, "print_trainable_parameters"):
                 model.base_model.print_trainable_parameters()
             if self.config.model.num_layers_unfrozen >= 0:
-                logger.warning("The argument num_layers_unfrozen is ignored when using peft, to prevent unexpected behaviour." "For Lora, use the `LoraConfig` argument `modules_to_save` instead.")
+                logger.warning(
+                    "The argument num_layers_unfrozen is ignored when using peft, to prevent unexpected behaviour."
+                    "For Lora, use the `LoraConfig` argument `modules_to_save` instead."
+                )
         for name, param in model.named_parameters():
             print(name, param.requires_grad)
-        # print(model.base_model)
-        # print(model.v_head)
-        # print(model.frozen_head)
 
         return model
 
@@ -418,7 +419,9 @@ class AccelerateRLTrainer(BaseRLTrainer):
                         batch_samples = list(map(torch.LongTensor, all_samples[start:end]))
                         batch_samples = torch.vstack(batch_samples).to(device)
                         batch_prompt_size = all_prompt_sizes[start]
-                        assert all(batch_prompt_size == x for x in all_prompt_sizes[start:end])  # config.train.batch_size must devide config.train.eval_batch_size
+                        assert all(
+                            batch_prompt_size == x for x in all_prompt_sizes[start:end]
+                        )  # config.train.batch_size must devide config.train.eval_batch_size
                         batch_masks = batch_samples.not_equal(self.tokenizer.pad_token_id).long().to(device)
 
                         logits = self.model(batch_samples, batch_masks, return_dict=True).logits
@@ -427,8 +430,14 @@ class AccelerateRLTrainer(BaseRLTrainer):
                             attention_mask=batch_masks,
                             return_dict=True,
                         ).logits
-                        logprobs = logprobs_of_labels(logits[:, :-1, :], batch_samples[:, 1:])[:, batch_prompt_size - 1 :] * batch_masks[:, batch_prompt_size - 1 : -1]
-                        ref_logprobs = logprobs_of_labels(ref_logits[:, :-1, :], batch_samples[:, 1:])[:, batch_prompt_size - 1 :] * batch_masks[:, batch_prompt_size - 1 : -1]
+                        logprobs = (
+                            logprobs_of_labels(logits[:, :-1, :], batch_samples[:, 1:])[:, batch_prompt_size - 1 :]
+                            * batch_masks[:, batch_prompt_size - 1 : -1]
+                        )
+                        ref_logprobs = (
+                            logprobs_of_labels(ref_logits[:, :-1, :], batch_samples[:, 1:])[:, batch_prompt_size - 1 :]
+                            * batch_masks[:, batch_prompt_size - 1 : -1]
+                        )
                         logratio = logprobs - ref_logprobs
                         kl_per_sample.extend(logratio.sum(dim=-1).tolist())
                         tokens_num.extend(batch_masks[:, batch_prompt_size - 1 : -1].sum(dim=-1).tolist())

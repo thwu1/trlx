@@ -17,7 +17,6 @@ from trlx.data.accelerate_base_datatypes import PromptBatch
 from trlx.data.configs import TRLConfig
 from trlx.data.p3o_types import P3ORLBatch, P3ORLElement
 from trlx.models.modeling_p3o import (
-    # MistralModelWithHydraHead,
     AutoModelForCausalLMWithHydraValueHead,
     AutoModelForSeq2SeqLMWithHydraValueHead,
 )
@@ -96,11 +95,6 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
 
     def get_arch(self, config: TRLConfig):
         """Get the model"""
-        # if config.model.model_path == "openchat/openchat_3.5":
-        #     print("Using P3O, return Model-wrapper MistralModelWithHydraHead")
-        #     base_model = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
-        #     return MistralModelWithHydraHead(base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen)
-
         model_class = AutoModelForCausalLMWithHydraValueHead
         if config.model.model_arch_type == "seq2seq":
             model_class = AutoModelForSeq2SeqLMWithHydraValueHead
@@ -130,7 +124,7 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         old_logprobs = batch.logprobs.to(self.accelerator.device)
         rewards = batch.scalar_rewards.to(self.accelerator.device)
         num_responses_per_query = self.config.method.num_responses_per_query
-        # print("num_responses_per_query:", num_responses_per_query)
+        assert num_responses_per_query == 2, "P3O only supports 2 responses per query"
 
         # if self.config.model.model_arch_type == "seq2seq":
         #     input_ids = query_tensors
@@ -160,35 +154,38 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
         #         values_pred[:, start:end],
         #         mask[:, start + 1 : end + 1],
         #     )
-        # else:
-        start = query_tensors.shape[1] - 1
-        tokens, attention_mask, position_ids, outputs, logits, ref_logits, logprobs, ref_logprobs, logratio = [], [], [], [], [], [], [], [], []
-        for i in range(num_responses_per_query):
-            tokens.append(torch.cat((query_tensors, response_tensors[i]), dim=1))
-            attention_mask.append(tokens[i].not_equal(self.tokenizer.pad_token_id).long().to(tokens[i].device))
-            position_ids.append(attention_mask[i].long().cumsum(-1) - 1)
-            position_ids[i].masked_fill_(attention_mask[i] == 0, 1)
-            outputs.append(self.model(tokens[i], attention_mask[i], return_dict=True, position_ids=position_ids[i]))
-            logits.append(outputs[i].logits)
-            ref_logits.append(self.model.forward_hydra(tokens[i], attention_mask[i], return_dict=True, position_ids=position_ids[i]).logits)
 
-            logprobs.append(logprobs_of_labels(logits[i][:, :-1, :], tokens[i][:, 1:])[:, start:] * attention_mask[i][:, start:-1])
-            logprob_len = logprobs[i].shape[1]
-            old_logprobs[i] = old_logprobs[i][:, :logprob_len]
-            assert logprobs[i].shape == old_logprobs[i].shape
-            ref_logprobs.append(logprobs_of_labels(ref_logits[i][:, :-1, :], tokens[i][:, 1:])[:, start:] * attention_mask[i][:, start:-1])
-            logratio.append(logprobs[i] - ref_logprobs[i].detach())
+        if self.config.model.model_arch_type == "seq2seq":  # TODO: add support for seq2seq
+            raise NotImplementedError("seq2seq not supported yet")
+        else:
+            start = query_tensors.shape[1] - 1
+            tokens, attention_mask, position_ids, outputs, logits, ref_logits, logprobs, ref_logprobs, logratio = [], [], [], [], [], [], [], [], []
+            for i in range(num_responses_per_query):
+                tokens.append(torch.cat((query_tensors, response_tensors[i]), dim=1))
+                attention_mask.append(tokens[i].not_equal(self.tokenizer.pad_token_id).long().to(tokens[i].device))
+                position_ids.append(attention_mask[i].long().cumsum(-1) - 1)
+                position_ids[i].masked_fill_(attention_mask[i] == 0, 1)
+                outputs.append(self.model(tokens[i], attention_mask[i], return_dict=True, position_ids=position_ids[i]))
+                logits.append(outputs[i].logits)
+                ref_logits.append(self.model.forward_hydra(tokens[i], attention_mask[i], return_dict=True, position_ids=position_ids[i]).logits)
 
-        start = query_tensors.shape[1] - 1
+                logprobs.append(logprobs_of_labels(logits[i][:, :-1, :], tokens[i][:, 1:])[:, start:] * attention_mask[i][:, start:-1])
+                logprob_len = logprobs[i].shape[1]
+                old_logprobs[i] = old_logprobs[i][:, :logprob_len]
+                assert logprobs[i].shape == old_logprobs[i].shape
+                ref_logprobs.append(logprobs_of_labels(ref_logits[i][:, :-1, :], tokens[i][:, 1:])[:, start:] * attention_mask[i][:, start:-1])
+                logratio.append(logprobs[i] - ref_logprobs[i].detach())
 
-        loss, stats = self.p3o_loss(
-            logratio=[torch.sum(logratio[i], dim=1) for i in range(num_responses_per_query)],
-            rewards=[rewards[i].detach() for i in range(num_responses_per_query)],
-            old_logratio=[old_logratios[i].detach() for i in range(num_responses_per_query)],
-            logprobs=logprobs,
-            old_logprobs=old_logprobs,
-            masks=[attention_mask[i][:, start:-1] for i in range(num_responses_per_query)],
-        )
+            start = query_tensors.shape[1] - 1
+
+            loss, stats = self.p3o_loss(
+                logratio=[torch.sum(logratio[i], dim=1) for i in range(num_responses_per_query)],
+                rewards=[rewards[i].detach() for i in range(num_responses_per_query)],
+                old_logratio=[old_logratios[i].detach() for i in range(num_responses_per_query)],
+                logprobs=logprobs,
+                old_logprobs=old_logprobs,
+                masks=[attention_mask[i][:, start:-1] for i in range(num_responses_per_query)],
+            )
 
         return loss, stats
 
@@ -346,9 +343,6 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             rollout_generate_time = time()
 
             # Generate samples from the language model (similar to using HuggingFace `generate` method)
-            # batch = {}
-            # for k, v in batch1.items():
-            #     batch[k] = torch.vstack([batch1[k], batch1[k]])  # double the prompts, as we want to generate 2 responses per prompt
             prompt_tensors = torch.vstack([batch.input_ids, batch.input_ids])
             attention_mask = torch.vstack([batch.attention_mask, batch.attention_mask])
             samples = self.generate(prompt_tensors, attention_mask)
@@ -363,7 +357,6 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             gathered_samples = self.accelerator.gather(padded_samples)
             gathered_prompts = self.accelerator.gather(padded_prompts)
             gathered_prompt_sizes = self.accelerator.gather(prompt_sizes)
-            # metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
 
             if self.accelerator.is_main_process:
                 all_str_samples, all_str_prompts, all_str_outputs = self.decode(
@@ -378,19 +371,15 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
                     prompts=all_str_prompts,
                     outputs=all_str_outputs,
                     tokenizer=self.tokenizer,
-                    # **metadata,
                 )
-                # print("373:", all_scores)
                 all_scores = [torch.tensor(score, dtype=torch.float, device=device).view(-1) for score in all_scores]
                 # Pad 0 reward on the ends
                 all_scores = pad_sequence(all_scores, batch_first=True, padding_value=-np.inf)
-                # print("377:", all_scores)
                 max_len = torch.tensor(all_scores.shape[1], dtype=torch.long, device=device)
 
                 stats["time/rollout_score"] = time() - rollout_score_time
 
                 all_scores = list(all_scores.reshape(self.accelerator.num_processes, -1, max_len).unbind())
-                # print("383:", all_scores)
             else:
                 all_scores = None
                 max_len = torch.tensor(0, dtype=torch.long, device=device)
@@ -455,7 +444,6 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
                         decoder_attention_mask=decoder_attention_mask,
                     )
                     logits = outputs.logits
-                    # values = outputs.value
                     if hasattr(self.model, "frozen_head") or self.model.peft_type:
                         ref_logits = self.model.forward_hydra(
                             input_ids=prompt_tensors,
@@ -522,7 +510,6 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
             ref_logprobs = ref_logprobs.cpu()
             prompt_tensors = prompt_tensors.cpu()
             sample_outputs = sample_outputs.cpu()
-            # values = values.cpu()[:, :-1]
 
             # Get the logprobs and values, for tokens that are not padding,
             # from the end of the prompt up to the <eos> token, while also including the latter
