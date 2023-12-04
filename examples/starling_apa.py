@@ -67,21 +67,8 @@ default_config = TRLConfig(
     ),
 )
 
+
 # accelerate launch --num_processes 2 --config_file ../../configs/accelerate/zero2-bf16.yaml mistral_ppo.py
-# TODO: test the reward model (done)
-# implement reward template, need to substitute the special tokens with the reward template when evaluate (done)
-# dataset template (done)
-# implement the policy template, figure out padding
-# review the mistral model structure and figure out how to add value head
-# implement the mistral conpatiable modeling
-# check the generation
-# for openchat-3.5, pad token should be eos token = <|end_of_turn|>
-
-
-# def prepare_tensor(name: str, input):
-#     t = client_util.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
-#     t.set_data_from_numpy(input)
-#     return t
 
 
 def create_reward_fn():  # noqa:  C901
@@ -98,12 +85,9 @@ def create_reward_fn():  # noqa:  C901
             # `gpt-neo(x)` models use `hidden_size` attribute names instead of `n_embd``
             self.config.n_embd = self.config.hidden_size if hasattr(self.config, "hidden_size") else self.config.n_embd
             self.model = model
-            # self.transformer = model.model
             self.alpha = alpha
             self.v_head = nn.Linear(self.config.n_embd, 1, bias=False)
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-            print("Reward tokenizer eos token:", self.tokenizer.eos_token)
-            # self.tokenizer.eos_token_id = eos_token_id
             self.tokenizer.pad_token = self.tokenizer.unk_token
             self.PAD_ID = self.tokenizer(self.tokenizer.pad_token)["input_ids"][0]
             self.K = 7
