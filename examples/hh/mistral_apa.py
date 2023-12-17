@@ -12,6 +12,7 @@ from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tritonclient.utils import np_to_triton_dtype
 from utils import from_openchat_to_llama, from_list_to_openchat
+from peft import LoraConfig, TaskType
 
 import trlx
 from trlx.data.default_configs import (
@@ -26,7 +27,7 @@ from trlx.data.default_configs import (
 
 default_config = TRLConfig(
     train=TrainConfig(
-        seq_length=2148,
+        seq_length=2048,
         epochs=10000,
         total_steps=20000,
         batch_size=4,
@@ -39,10 +40,19 @@ default_config = TRLConfig(
         trainer="AcceleratePPOTrainer",
         checkpoint_dir="checkpoints/ppo_hh",
     ),
-    model=ModelConfig(model_path="openchat/openchat_3.5", num_layers_unfrozen=4),
-    tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
-    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=2e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
-    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=2e-7)),
+    model=ModelConfig(
+        model_path="banghua/openchat-3.5-1210-bin",
+        num_layers_unfrozen=4,
+        # peft_config=LoraConfig(
+        #     r=8,
+        #     task_type=TaskType.CAUSAL_LM,
+        #     lora_alpha=32,
+        #     lora_dropout=0.1,
+        # ),
+    ),
+    tokenizer=TokenizerConfig(tokenizer_path="banghua/openchat-3.5-1210-bin", truncation_side="left"),
+    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=1e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
+    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=1e-7)),
     method=PPOConfig(
         name="PPOConfig",
         num_rollouts=64,
@@ -155,7 +165,7 @@ def create_reward_fn():  # noqa:  C901
         if fpath.endswith(".pt") or fpath.endswith("model.bin"):
             checkpoint = os.path.join(directory, fpath)
             break
-   
+
     reward_model.load_state_dict(torch.load(checkpoint), strict=False)
     reward_model.eval()
     reward_model.requires_grad_(False)
@@ -165,6 +175,7 @@ def create_reward_fn():  # noqa:  C901
         reward_batch_size = 4
     else:
         del reward_model
+
     def get_reward(samples):
         """samples: List[str]"""
         input_ids = []
