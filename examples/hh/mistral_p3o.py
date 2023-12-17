@@ -45,13 +45,13 @@ default_config = TRLConfig(
     ),
     model=ModelConfig(
         model_path="openchat/openchat_3.5",
-        # num_layers_unfrozen=7,
-        peft_config=LoraConfig(
-            r=8,
-            task_type=TaskType.CAUSAL_LM,
-            lora_alpha=32,
-            lora_dropout=0.1,
-        ),
+        num_layers_unfrozen=2,
+        # peft_config=LoraConfig(
+        #     r=8,
+        #     task_type=TaskType.CAUSAL_LM,
+        #     lora_alpha=32,
+        #     lora_dropout=0.1,
+        # ),
     ),
     tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
     optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=4e-8, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
