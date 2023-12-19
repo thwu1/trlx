@@ -51,8 +51,8 @@ default_config = TRLConfig(
         # ),
     ),
     tokenizer=TokenizerConfig(tokenizer_path="banghua/openchat-3.5-1210-bin", truncation_side="left"),
-    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=1e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
-    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=1e-7)),
+    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=5e-9, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
+    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=5e-9)),
     method=PPOConfig(
         name="PPOConfig",
         num_rollouts=64,
@@ -74,6 +74,7 @@ default_config = TRLConfig(
             max_new_tokens=1024,
             top_k=0,
             top_p=1.0,
+            temperature=0.5,
             do_sample=True,
         ),
     ),
@@ -207,7 +208,7 @@ def create_reward_fn():  # noqa:  C901
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train")
+    dataset = load_dataset("ThWu/cleaned_prompt_r_2", split="train")
     dataset = dataset.train_test_split(test_size=0.001, seed=42)
     dataset = dataset.map(from_list_to_openchat)
 
