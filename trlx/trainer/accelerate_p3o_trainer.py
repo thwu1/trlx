@@ -17,7 +17,7 @@ from trlx.data.accelerate_base_datatypes import PromptBatch
 from trlx.data.configs import TRLConfig
 from trlx.data.p3o_types import P3ORLBatch, P3ORLElement
 from trlx.models.modeling_p3o import (
-    # MistralModelWithHydraHead,
+    MistralModelWithHydraHead,
     AutoModelForCausalLMWithHydraValueHead,
     AutoModelForSeq2SeqLMWithHydraValueHead,
 )
@@ -96,10 +96,10 @@ class AccelerateP3OTrainer(AccelerateRLTrainer):
 
     def get_arch(self, config: TRLConfig):
         """Get the model"""
-        # if config.model.model_path == "openchat/openchat_3.5":
-        #     print("Using P3O, return Model-wrapper MistralModelWithHydraHead")
-        #     base_model = AutoModelForCausalLM.from_pretrained("openchat/openchat_3.5")
-        #     return MistralModelWithHydraHead(base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen)
+        if "openchat" in config.model.model_path or "mistral" in config.model.model_path:
+            print("Using P3O, return Model-wrapper MistralModelWithHydraHead")
+            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path)
+            return MistralModelWithHydraHead(base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen, peft_config=config.model.peft_config)
 
         model_class = AutoModelForCausalLMWithHydraValueHead
         if config.model.model_arch_type == "seq2seq":
