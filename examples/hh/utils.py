@@ -29,6 +29,16 @@ def from_list_to_openchat(sample: Dict[str, List[str]]) -> Dict[str, str]:
     str += "GPT4 Correct Assistant:"
     return {"prompt": str}
 
+def from_list_to_mixtral(sample: Dict[str, List[str]]) -> Dict[str, str]:
+    str = ""
+    for i, content in enumerate(sample["conversations"]):
+        if i % 2 == 0:
+            str += "[INST] " + content + " "
+        else:
+            str += "[/INST] " + content + "</s>"
+    str += "[/INST]"
+    return {"prompt": str}
+
 
 def strip_ls(ls: List[str]) -> List[str]:
     for i, content in enumerate(ls):

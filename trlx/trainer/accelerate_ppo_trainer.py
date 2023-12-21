@@ -20,6 +20,7 @@ from trlx.data.ppo_types import PPORLBatch, PPORLElement
 from trlx.models.modeling_ppo import (
     AdaptiveKLController,
     MistralModelWithHydraValueHead,
+    MixtralModelWithHydraValueHead,
     AutoModelForCausalLMWithHydraValueHead,
     AutoModelForSeq2SeqLMWithHydraValueHead,
     FixedKLController,
@@ -107,10 +108,18 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
 
     def get_arch(self, config: TRLConfig):
         """Get the model"""
-        if "openchat" in config.model.model_path or "mistral" in config.model.model_path:
+        if "mixtral" in config.model.model_path.lower():
+            print(f"Detecting model name mixtral in {config.model.model_path}, use Wrapper class MixtralModelWithHydraValueHead")
+            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path)
+            return MixtralModelWithHydraValueHead(
+                base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen, peft_config=self.config.model.peft_config
+            )
+        elif "openchat" in config.model.model_path.lower() or "mistral" in config.model.model_path.lower():
             print(f"Detecting model name {config.model.model_path}, use Wrapper class MistralModelWithHydraValueHead")
             base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path)
-            return MistralModelWithHydraValueHead(base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen, peft_config=self.config.model.peft_config)
+            return MistralModelWithHydraValueHead(
+                base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen, peft_config=self.config.model.peft_config
+            )
 
         model_class = AutoModelForCausalLMWithHydraValueHead
         if config.model.model_arch_type == "seq2seq":
@@ -300,7 +309,9 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
 
             if self.accelerator.is_main_process:
-                all_str_samples, all_str_prompts, all_str_outputs = self.decode(gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False)
+                all_str_samples, all_str_prompts, all_str_outputs = self.decode(
+                    gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False
+                )
                 # print("all_str_samples:", all_str_samples)
                 # print("all_str_prompts:", all_str_prompts)
                 # print("all_str_outputs:", all_str_outputs)

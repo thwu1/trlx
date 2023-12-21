@@ -11,7 +11,7 @@ from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tritonclient.utils import np_to_triton_dtype
-from utils import from_openchat_to_llama, from_list_to_openchat, fake_reward, create_reward_fn
+from utils import fake_reward, create_reward_fn, from_list_to_mixtral
 from peft import LoraConfig, TaskType
 
 import trlx
@@ -43,9 +43,7 @@ default_config = TRLConfig(
     ),
     model=ModelConfig(
         model_path="mistralai/Mixtral-8x7B-Instruct-v0.1",
-        # model_path="openchat/openchat_3.5",
-        # model_path="lmsys/vicuna-7b-v1.5",
-        num_layers_unfrozen=6,
+        num_layers_unfrozen=1,
         # peft_config=LoraConfig(
         #     r=8,
         #     task_type=TaskType.CAUSAL_LM,
@@ -54,8 +52,6 @@ default_config = TRLConfig(
         # ),
     ),
     tokenizer=TokenizerConfig(tokenizer_path="mistralai/Mixtral-8x7B-Instruct-v0.1", truncation_side="left"),
-    # tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
-    # tokenizer=TokenizerConfig(tokenizer_path="lmsys/vicuna-7b-v1.5", truncation_side="left"),
     optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=2e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
     scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=2e-7)),
     method=PPOConfig(
@@ -99,13 +95,13 @@ default_config = TRLConfig(
 #     t = client_util.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
 #     t.set_data_from_numpy(input)
 #     return t
-test_run = True
+test_run = False
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt_2", split="train")
+    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train")
     dataset = dataset.train_test_split(test_size=0.001, seed=42)
-    dataset = dataset.map(from_list_to_openchat)
+    dataset = dataset.map(from_list_to_mixtral, num_proc=4)
 
     prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
     eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 100)]
@@ -116,7 +112,7 @@ def main(hparams={}):
         eval_prompts=eval_prompts,
         reward_fn=reward_fn,
         config=config,
-        stop_sequences=["GPT4 Correct User:", "GPT4 Correct Assistant:"],
+        stop_sequences=["[INST]", "[/INST]"],
     )
 
 
