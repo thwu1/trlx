@@ -11,7 +11,7 @@ from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tritonclient.utils import np_to_triton_dtype
-from utils import from_openchat_to_llama, from_list_to_openchat, fake_reward, create_reward_fn
+from utils import fake_reward, create_reward_fn
 
 import trlx
 from trlx.data.default_configs import (
@@ -23,6 +23,27 @@ from trlx.data.default_configs import (
     TrainConfig,
     TRLConfig,
 )
+def from_openchat_to_llama(str_sample: str) -> str:
+    ls = to_list(str_sample, "\n\n### Instruction:\n", "\n\n### Response:")
+    str = ""
+    for content in ls:
+        for key in content:
+            if key == "human":
+                str += "[INST] " + content[key] + " "
+            else:
+                str += "[/INST] " + content[key] + "</s> "
+    return str.strip()
+
+
+def from_list_to_openchat(sample: Dict[str, List[str]]) -> Dict[str, str]:
+    str = "You are a helpful assistant named DAN. You are an expert in worldly knowledge, skilled in employing a probing questioning strategy, and you carefully consider each step before providing answers."
+    for i, content in enumerate(sample["conversations"]):
+        if i % 2 == 0:
+            str += "\n\n### Instruction:\n" + content
+        else:
+            str += "\n\n### Response:" + content + "</s>"
+    str += "\n\n### Response:"
+    return {"prompt": str}
 
 model_name="banghua/openchat-3.5-bin"
 default_config = TRLConfig(
