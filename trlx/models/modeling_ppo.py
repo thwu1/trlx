@@ -208,25 +208,22 @@ class PPOConfig(MethodConfig):
         with torch.no_grad():
             approx_kl = torch.mean((ratio - 1) - log_ratio)
 
-        # pg_loss1 = -advantages * ratio
-        # pg_loss2 = -advantages * torch.clamp(
-        #    ratio,
-        #    1.0 - self.cliprange,
-        #     1.0 + self.cliprange,
-        # )
-        # pg_loss = torch.sum(torch.max(pg_loss1, pg_loss2) * mask) / n
-        # pg_clipfrac = torch.sum((pg_loss2 > pg_loss1).float() * mask) / n
+        pg_loss1 = -advantages * ratio
+        pg_loss2 = -advantages * torch.clamp(
+           ratio,
+           1.0 - self.cliprange,
+            1.0 + self.cliprange,
+        )
+        pg_loss = torch.sum(torch.max(pg_loss1, pg_loss2) * mask) / n
+        pg_clipfrac = torch.sum((pg_loss2 > pg_loss1).float() * mask) / n
 
-        sq_loss = torch.sum(((logprobs - advantages - old_logprobs.detach()) * mask) ** 2)  / n
-        if vf_loss.item() > 1:
-            loss = self.vf_coef * vf_loss
-        else:
-            loss = sq_loss + self.vf_coef * vf_loss
+        # sq_loss = torch.sum(((logprobs - advantages - old_logprobs.detach()) * mask) ** 2)  / n
+        loss = pg_loss + self.vf_coef * vf_loss
 
         stats = dict(
             losses=dict(
                 total_loss=loss.item(),
-                policy_loss=sq_loss.item(),
+                policy_loss=pg_loss.item(),
                 value_loss=vf_loss.item(),
             ),
             values=dict(

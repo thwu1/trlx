@@ -24,6 +24,7 @@ from trlx.data.default_configs import (
     TRLConfig,
 )
 
+model_name="banghua/openchat-3.5-bin"
 default_config = TRLConfig(
     train=TrainConfig(
         seq_length=2148,
@@ -39,10 +40,10 @@ default_config = TRLConfig(
         trainer="AcceleratePPOTrainer",
         checkpoint_dir="checkpoints/ppo_hh",
     ),
-    model=ModelConfig(model_path="openchat/openchat_3.5", num_layers_unfrozen=4),
-    tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
-    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=2e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
-    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=2e-7)),
+    model=ModelConfig(model_path=model_name, num_layers_unfrozen=4),
+    tokenizer=TokenizerConfig(tokenizer_path=model_name, truncation_side="left"),
+    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=1e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
+    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=1e-7)),
     method=PPOConfig(
         name="PPOConfig",
         num_rollouts=64,
@@ -88,7 +89,7 @@ test_run = False
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt", split="train")
+    dataset = load_dataset("ThWu/cleaned_prompt_r_2", split="train")
     dataset = dataset.train_test_split(test_size=0.001, seed=42)
     dataset = dataset.map(from_list_to_openchat)
 
@@ -101,7 +102,7 @@ def main(hparams={}):
         eval_prompts=eval_prompts,
         reward_fn=reward_fn,
         config=config,
-        stop_sequences=["GPT4 Correct User:", "GPT4 Correct Assistant:"],
+        stop_sequences=["\n\n### Instruction:\n", "\n\n### Response:"],
     )
 
 

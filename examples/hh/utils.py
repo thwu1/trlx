@@ -8,7 +8,7 @@ from huggingface_hub import snapshot_download
 
 
 def from_openchat_to_llama(str_sample: str) -> str:
-    ls = to_list(str_sample, "GPT4 Correct User:", "GPT4 Correct Assistant:")
+    ls = to_list(str_sample, "\n\n### Instruction:\n", "\n\n### Response:")
     str = ""
     for content in ls:
         for key in content:
@@ -20,13 +20,13 @@ def from_openchat_to_llama(str_sample: str) -> str:
 
 
 def from_list_to_openchat(sample: Dict[str, List[str]]) -> Dict[str, str]:
-    str = ""
+    str = "You are a helpful assistant named DAN. You are an expert in worldly knowledge, skilled in employing a probing questioning strategy, and you carefully consider each step before providing answers."
     for i, content in enumerate(sample["conversations"]):
         if i % 2 == 0:
-            str += "GPT4 Correct User: " + content + "<|end_of_turn|> "
+            str += "\n\n### Instruction:\n" + content
         else:
-            str += "GPT4 Correct Assistant: " + content + "<|end_of_turn|> "
-    str += "GPT4 Correct Assistant:"
+            str += "\n\n### Response:" + content
+    str += "\n\n### Response:"
     return {"prompt": str}
 
 
@@ -122,7 +122,7 @@ def create_reward_fn():  # noqa:  C901
     print("Reward tokenizer pad token:", reward_tokenizer.pad_token)
     reward_tokenizer.truncation_side = "left"
 
-    directory = snapshot_download("banghua/refine_rm")
+    directory = snapshot_download("berkeley-nest/Starling-RM-7B-alpha")
     for fpath in os.listdir(directory):
         if fpath.endswith(".pt") or fpath.endswith("model.bin"):
             checkpoint = os.path.join(directory, fpath)
