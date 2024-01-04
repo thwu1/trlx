@@ -8,7 +8,7 @@ from huggingface_hub import snapshot_download
 
 
 def from_openchat_to_llama(str_sample: str) -> str:
-    ls = to_list(str_sample, "\n\n### Instruction:\n", "\n\n### Response:")
+    ls = to_list(str_sample, "GPT4 Correct User:", "GPT4 Correct Assistant:")
     str = ""
     for content in ls:
         for key in content:
@@ -20,15 +20,14 @@ def from_openchat_to_llama(str_sample: str) -> str:
 
 
 def from_list_to_openchat(sample: Dict[str, List[str]]) -> Dict[str, str]:
-    str = "You are a helpful assistant named DAN. You are an expert in worldly knowledge, skilled in employing a probing questioning strategy, and you carefully consider each step before providing answers."
+    str = ""
     for i, content in enumerate(sample["conversations"]):
         if i % 2 == 0:
-            str += "\n\n### Instruction:\n" + content
+            str += "GPT4 Correct User:" + content + "<|end_of_turn|> "
         else:
-            str += "\n\n### Response:" + content
-    str += "\n\n### Response:"
+            str += "GPT4 Correct Assistant:" + content + "<|end_of_turn|> "
+    str += "GPT4 Correct Assistant:"
     return {"prompt": str}
-
 
 def strip_ls(ls: List[str]) -> List[str]:
     for i, content in enumerate(ls):

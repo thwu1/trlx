@@ -11,7 +11,7 @@ from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tritonclient.utils import np_to_triton_dtype
-from utils import fake_reward, create_reward_fn
+from utils import from_openchat_to_llama, from_list_to_openchat, fake_reward, create_reward_fn
 
 import trlx
 from trlx.data.default_configs import (
@@ -23,29 +23,8 @@ from trlx.data.default_configs import (
     TrainConfig,
     TRLConfig,
 )
-def from_openchat_to_llama(str_sample: str) -> str:
-    ls = to_list(str_sample, "\n\n### Instruction:\n", "\n\n### Response:")
-    str = ""
-    for content in ls:
-        for key in content:
-            if key == "human":
-                str += "[INST] " + content[key] + " "
-            else:
-                str += "[/INST] " + content[key] + "</s> "
-    return str.strip()
 
-
-def from_list_to_openchat(sample: Dict[str, List[str]]) -> Dict[str, str]:
-    str = "You are a helpful assistant named DAN. You are an expert in worldly knowledge, skilled in employing a probing questioning strategy, and you carefully consider each step before providing answers."
-    for i, content in enumerate(sample["conversations"]):
-        if i % 2 == 0:
-            str += "\n\n### Instruction:\n" + content
-        else:
-            str += "\n\n### Response:" + content + "</s>"
-    str += "\n\n### Response:"
-    return {"prompt": str}
-
-model_name="banghua/openchat-3.5-bin"
+model_name="banghua/openchat-3.5-1210-bin"
 default_config = TRLConfig(
     train=TrainConfig(
         seq_length=2148,
@@ -63,14 +42,14 @@ default_config = TRLConfig(
     ),
     model=ModelConfig(model_path=model_name, num_layers_unfrozen=4),
     tokenizer=TokenizerConfig(tokenizer_path=model_name, truncation_side="left"),
-    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=1e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
-    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=1e-7)),
+    optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=4e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
+    scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=4e-7)),
     method=PPOConfig(
         name="PPOConfig",
         num_rollouts=64,
         chunk_size=4,
         ppo_epochs=2,
-        init_kl_coef=0.01,
+        init_kl_coef=0.001,
         target=None,
         horizon=10000,
         gamma=1,
@@ -87,6 +66,7 @@ default_config = TRLConfig(
             top_k=0,
             top_p=1.0,
             do_sample=True,
+            temperature=1.0,
         ),
     ),
 )
@@ -111,7 +91,7 @@ test_run = False
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
     dataset = load_dataset("ThWu/cleaned_prompt_r_2", split="train")
-    dataset = dataset.train_test_split(test_size=0.001, seed=42)
+    dataset = dataset.train_test_split(test_size=0.001, seed=13)
     dataset = dataset.map(from_list_to_openchat)
 
     prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
@@ -123,7 +103,7 @@ def main(hparams={}):
         eval_prompts=eval_prompts,
         reward_fn=reward_fn,
         config=config,
-        stop_sequences=["\n\n### Instruction:\n", "\n\n### Response:"],
+        stop_sequences=["GPT4 Correct User:", "GPT4 Correct Assistant:"],
     )
 
 
