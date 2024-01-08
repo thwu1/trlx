@@ -12,7 +12,9 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
-
+from peft import get_peft_config, get_peft_model
+import gc
+from transformers import BitsAndBytesConfig
 import trlx.utils.logging as logging
 from trlx.data.accelerate_base_datatypes import PromptBatch
 from trlx.data.configs import TRLConfig
@@ -110,23 +112,43 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
         """Get the model"""
         if "mixtral" in config.model.model_path.lower():
             print(f"Detecting model name mixtral in {config.model.model_path}, use Wrapper class MixtralModelWithHydraValueHead")
-            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path)
+            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path, torch_dtype=torch.bfloat16)
             return MixtralModelWithHydraValueHead(
-                base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen, peft_config=self.config.model.peft_config
+                base_model=base_model,
+                num_layers_unfrozen=config.model.num_layers_unfrozen,
+                peft_config=self.config.model.peft_config,
+                **self.config.model.model_extra_configs,
             )
         elif "openchat" in config.model.model_path.lower() or "mistral" in config.model.model_path.lower():
             print(f"Detecting model name {config.model.model_path}, use Wrapper class MistralModelWithHydraValueHead")
-            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path)
+            nf4_config = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16
+            )
+            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path, torch_dtype=torch.bfloat16)
+            # base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+            peft_config = self.config.model.peft_config
+            if peft_config:
+                if isinstance(peft_config, dict):
+                    peft_config = get_peft_config(peft_config)
+                base_model = get_peft_model(base_model, peft_config)
+                base_model.config.use_cache = False  # required for gradient checkpointing
+                base_model.enable_input_require_grads()  # required for gradient checkpointing
+                base_model.gradient_checkpointing_enable()  # enable gradient checkpointing
             return MistralModelWithHydraValueHead(
-                base_model=base_model, num_layers_unfrozen=config.model.num_layers_unfrozen, peft_config=self.config.model.peft_config
+                base_model=base_model,
+                num_layers_unfrozen=config.model.num_layers_unfrozen,
+                peft_config=peft_config,
+                **self.config.model.model_extra_configs,
             )
 
         model_class = AutoModelForCausalLMWithHydraValueHead
         if config.model.model_arch_type == "seq2seq":
             model_class = AutoModelForSeq2SeqLMWithHydraValueHead
         from_fn = model_class.from_pretrained
+        print("use from_pretrained")
         # backward-compat: Try to create a randomly initialized architecture from a config
         if issubclass(type(config.model.model_path), transformers.PretrainedConfig):
+            print("is_subclass, use from_config")
             from_fn = model_class.from_config
 
         return from_fn(
@@ -234,9 +256,11 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
         self.store.clear_history()
         # Collect more rollouts for training
         self.make_experience(self.config.method.num_rollouts, self.iter_count)
+        # self.store.export_history("history", only_text=False)
 
     def post_backward_callback(self):
         self.kl_ctl.update(self.mean_kl, n_steps=self.config.train.batch_size)
+        pass
 
     def create_train_dataloader(self):
         return self.store.create_loader(self.config.train.batch_size, shuffle=True)
@@ -269,6 +293,14 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             num_rollouts: Number of rollouts to generate
             iter_count: Total number of updates for all batches & epochs
         """
+        gc.collect()
+        torch.cuda.empty_cache()
+        ### test run
+        # self.store.from_json("history")
+        # print(self.store.history)
+        # gc.collect()
+        # torch.cuda.empty_cache()
+        # return
         logger.info("Collecting rollouts")
         tbar = logging.tqdm(
             total=num_rollouts,
@@ -533,6 +565,8 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
 
         # Push samples and rewards to trainer's rollout storage
         self.push_to_store(ppo_rl_elements)
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def save_pretrained(self, directory: Optional[str] = None, **kwargs):
         """

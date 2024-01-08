@@ -4,7 +4,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
-
+import warnings
 import deepspeed
 import numpy as np
 import torch
@@ -21,6 +21,7 @@ from transformers.modeling_outputs import (
     MoeModelOutputWithPast,
     MoeCausalLMOutputWithPast,
 )
+from peft import PeftModelForCausalLM
 from transformers.models.bloom import modeling_bloom
 from transformers.models.opt import modeling_opt
 
@@ -267,6 +268,7 @@ class CausalLMOutputWithValue(ModelOutput):
 
 
 def make_value_branch(base_model, num_value_layers_unfrozen):
+    print("base_model", base_model.eval())
     value_head = make_head(hf_get_hidden_size(base_model.config), 1)
     if num_value_layers_unfrozen == 0:
         return value_head
@@ -278,8 +280,11 @@ def make_value_branch(base_model, num_value_layers_unfrozen):
 
 
 def make_mistral_value_branch(base_model, num_value_layers_unfrozen):
-    value_head = nn.Linear(4096, 1, bias=False)
-    if num_value_layers_unfrozen == 0:
+    # print("base_model", base_model.eval())
+    value_head = make_head(base_model.config.hidden_size, 1)
+    if isinstance(base_model, PeftModelForCausalLM) or num_value_layers_unfrozen == 0:
+        if num_value_layers_unfrozen != 0:
+            warnings.warn("PeftModelForCausalLM does not support num_value_layers_unfrozen != 0")
         return value_head
     value_branch = MistralModelBranch(base_model=base_model, num_layers_unfrozen=num_value_layers_unfrozen)
     value_branch.lm_head = value_head
@@ -287,9 +292,11 @@ def make_mistral_value_branch(base_model, num_value_layers_unfrozen):
 
 
 def make_mixtral_value_branch(base_model, num_value_layers_unfrozen):
-    value_head = nn.Linear(4096, 1, bias=False)
-    print("test-base-model-config:", base_model.config)
-    if num_value_layers_unfrozen == 0:
+    value_head = make_head(base_model.config.hidden_size, 1)
+    # print("test-base-model-config:", base_model.config)
+    if isinstance(base_model, PeftModelForCausalLM) or num_value_layers_unfrozen == 0:
+        if num_value_layers_unfrozen != 0:
+            warnings.warn("PeftModelForCausalLM does not support num_value_layers_unfrozen != 0")
         return value_head
     value_branch = MixtralModelBranch(base_model=base_model, num_layers_unfrozen=num_value_layers_unfrozen)
     value_branch.lm_head = value_head
@@ -316,11 +323,21 @@ class MixtralModelBranch(transformers.PreTrainedModel):
         self.num_experts = base_model.model.config.num_local_experts
         self.num_experts_per_tok = base_model.model.config.num_experts_per_tok
 
-        self.embed_tokens = deepcopy(base_model.model.embed_tokens)
-        self.embed_tokens.requires_grad_(False)
-        self.layers = deepcopy(base_model.model.layers[-num_layers_unfrozen:])
-        self.norm = deepcopy(base_model.model.norm)
-        self.lm_head = deepcopy(base_model.lm_head)
+        embed_tokens = base_model.model.embed_tokens
+        layers = base_model.model.layers[-num_layers_unfrozen:]
+        norm = base_model.model.norm
+        lm_head = base_model.lm_head
+
+        with deepspeed.zero.GatheredParameters(
+            list(embed_tokens.parameters()) + list(layers.parameters()) + list(norm.parameters()) + list(lm_head.parameters()),
+            modifier_rank=None,
+        ):
+            self.embed_tokens = deepcopy(embed_tokens)
+            self.embed_tokens.requires_grad_(False)
+            self.layers = deepcopy(layers)
+            self.norm = deepcopy(norm)
+            self.lm_head = deepcopy(lm_head)
+
         self.gradient_checkpointing = False
 
     def forward(
@@ -498,10 +515,9 @@ class MixtralModelWithHydraValueHead(PreTrainedModelWrapper):
         super().__init__(base_model, peft_config=peft_config)
         self.num_layers_unfrozen = num_layers_unfrozen
         self.v_head = make_mixtral_value_branch(base_model, num_layers_unfrozen)
-        self.frozen_head = MixtralModelBranch(base_model, num_layers_unfrozen)
+        self.frozen_head = MixtralModelBranch(base_model, num_layers_unfrozen).eval()
         for param in self.frozen_head.parameters():
             param.requires_grad = False
-        self.frozen_head = self.frozen_head.eval()
 
     def forward(
         self,
@@ -622,14 +638,29 @@ class MistralModelBranch(transformers.PreTrainedModel):
         num_layers_unfrozen: int,
     ):
         super().__init__(base_model.config)
-        self.padding_idx = base_model.model.config.pad_token_id
-        self.vocab_size = base_model.model.config.vocab_size
+        if isinstance(base_model, PeftModelForCausalLM):
+            print("base_model is PeftModelForCausalLM")
+            causal_model = base_model.base_model.model
+        else:
+            causal_model = base_model
+        self.padding_idx = causal_model.model.config.pad_token_id
+        self.vocab_size = causal_model.model.config.vocab_size
 
-        self.embed_tokens = deepcopy(base_model.model.embed_tokens)
-        self.embed_tokens.requires_grad_(False)
-        self.layers = deepcopy(base_model.model.layers[-num_layers_unfrozen:])
-        self.norm = deepcopy(base_model.model.norm)
-        self.lm_head = deepcopy(base_model.lm_head)
+        embed_tokens = causal_model.model.embed_tokens
+        layers = causal_model.model.layers[-num_layers_unfrozen:]
+        norm = causal_model.model.norm
+        lm_head = causal_model.lm_head
+
+        with deepspeed.zero.GatheredParameters(
+            list(embed_tokens.parameters()) + list(layers.parameters()) + list(norm.parameters()) + list(lm_head.parameters()),
+            modifier_rank=None,
+        ):
+            self.embed_tokens = deepcopy(embed_tokens)
+            self.embed_tokens.requires_grad_(False)
+            self.layers = deepcopy(layers)
+            self.norm = deepcopy(norm)
+            self.lm_head = deepcopy(lm_head)
+
         self.gradient_checkpointing = False
 
     def forward(
@@ -801,12 +832,21 @@ class MistralModelWithHydraValueHead(PreTrainedModelWrapper):
         num_layers_unfrozen=0,
     ):
         super().__init__(base_model, peft_config=peft_config)
+        # self.base_model.gradient_checkpointing_enable()
         self.num_layers_unfrozen = num_layers_unfrozen
+        # print("before creat v head base_model", base_model.eval())
         self.v_head = make_mistral_value_branch(base_model, num_layers_unfrozen)
-        self.frozen_head = MistralModelBranch(base_model, num_layers_unfrozen)
-        for param in self.frozen_head.parameters():
-            param.requires_grad = False
-        self.frozen_head = self.frozen_head.eval()
+        # print("self.peft_type", self.peft_type)
+        # print("self.peft_config", self.peft_config)
+        if self.num_layers_unfrozen > 0 and not self.peft_type:
+            self.frozen_head = MistralModelBranch(base_model, num_layers_unfrozen)
+            for param in self.frozen_head.parameters():
+                param.requires_grad = False
+            self.frozen_head = self.frozen_head.eval()
+        else:
+            self.base_model.add_adapter(peft_config=self.peft_config, adapter_name="value_adapter")
+            # self.base_model.gradient_checkpointing_enable()
+            self.frozen_head = None
 
     def forward(
         self,
@@ -826,14 +866,29 @@ class MistralModelWithHydraValueHead(PreTrainedModelWrapper):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "position_ids": position_ids,
+            # "use_cache": True,
             "output_hidden_states": True,
             "return_dict": True,
         }
 
+        if self.peft_type:
+            self.base_model.set_adapter("default")
+            outputs = self.base_model(**forward_kwargs)
+            self.base_model.set_adapter("value_adapter")
+            value_hidden_states = self.base_model(**forward_kwargs)["hidden_states"][-1]
+            value = self.v_head(value_hidden_states).squeeze(-1)
+            if not return_dict:
+                outputs = (outputs.logits,) + outputs[1:] + (value,)
+                return outputs
+            return CausalLMOutputWithValue(**outputs, value=value)
+
         outputs = self.base_model(**forward_kwargs)
         forward_kwargs["hidden_states"] = outputs["hidden_states"][-(self.num_layers_unfrozen + 1)]
         forward_kwargs.pop("return_dict", None)
-        value = self.v_head(**forward_kwargs).logits.squeeze(-1)
+        if self.num_layers_unfrozen > 0:
+            value = self.v_head(**forward_kwargs).logits.squeeze(-1)
+        else:
+            value = self.v_head(outputs.logits).squeeze(-1)
 
         if not return_dict:
             outputs = (outputs.logits,) + outputs[1:] + (value,)
@@ -858,18 +913,25 @@ class MistralModelWithHydraValueHead(PreTrainedModelWrapper):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "position_ids": position_ids,
+            # "use_cache": True,
             "output_hidden_states": True,
             "return_dict": True,
         }
-        outputs = self.forward(**forward_kwargs)
-        forward_kwargs["hidden_states"] = outputs["hidden_states"][-(self.num_layers_unfrozen + 1)]
-        hydra_outputs = self.frozen_head(**forward_kwargs)
+        if self.peft_type:
+            with self.base_model.disable_adapter():
+                hydra_outputs = self.base_model(**forward_kwargs)
+        else:
+            outputs = self.forward(**forward_kwargs)
+            forward_kwargs["hidden_states"] = outputs["hidden_states"][-(self.num_layers_unfrozen + 1)]
+            hydra_outputs = self.frozen_head(**forward_kwargs)
 
         if not return_dict:
             return hydra_outputs.logits
         return hydra_outputs
 
     def generate(self, *args, **kwargs) -> Union[ModelOutput, torch.LongTensor]:
+        if self.peft_type:
+            self.base_model.set_adapter("default")
         return self.base_model.generate(*args, **kwargs)
 
     def state_dict(self, *args, heads_only=False, **kwargs):
@@ -937,6 +999,7 @@ class AutoModelForCausalLMWithValueHead(PreTrainedModelWrapper):
     ):
         super().__init__(base_model, peft_config=peft_config)
         self.num_value_layers_unfrozen = num_value_layers_unfrozen
+        print("before creating v head, base_model", base_model.eval())
         self.v_head = make_value_branch(base_model, num_value_layers_unfrozen)
 
     def forward(
@@ -1181,6 +1244,7 @@ class ModelBranch(transformers.PreTrainedModel):
         # The branch is defined by the last `num_layers_unfrozen` layers of the pretrained model
 
         decoder_blocks = hf_get_decoder_blocks(base_model)[-num_layers_unfrozen:]
+        print("Model Branch decoder_blocks", decoder_blocks)
         final_norm = hf_get_decoder_final_norm(base_model)
         lm_head = hf_get_lm_head(base_model)
 

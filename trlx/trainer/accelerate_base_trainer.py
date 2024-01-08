@@ -6,7 +6,7 @@ from abc import abstractmethod
 from contextlib import contextmanager
 from time import time
 from typing import Dict, List, Optional, Tuple
-
+import gc
 import ray
 import torch
 import math
@@ -165,9 +165,6 @@ class AccelerateRLTrainer(BaseRLTrainer):
                 logger.warning("The argument num_layers_unfrozen is ignored when using peft, to prevent unexpected behaviour." "For Lora, use the `LoraConfig` argument `modules_to_save` instead.")
         for name, param in model.named_parameters():
             print(name, param.requires_grad)
-        # print(model.base_model)
-        # print(model.v_head)
-        # print(model.frozen_head)
 
         return model
 
@@ -333,7 +330,11 @@ class AccelerateRLTrainer(BaseRLTrainer):
 
     def evaluate(self):  # noqa: C901
         """Samples model using `eval_prompts`, computes statistics with `reward_fn` and `metric_fn`"""
+        ### test run
+        gc.collect()
+        torch.cuda.empty_cache()
         logger.info("Evaluating model")
+        # return {}
 
         # Do multiple evaluations over a single list in `gen_kwargs` if present
         if self.generate_sweep_kwarg is not None:
@@ -519,6 +520,9 @@ class AccelerateRLTrainer(BaseRLTrainer):
                 stats["samples"] = wandb.Table(columns, rows)
 
         self.nth_evaluation += 1
+
+        gc.collect()
+        torch.cuda.empty_cache()
         return stats
 
     @contextmanager

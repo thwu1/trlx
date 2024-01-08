@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 from trlx.data.ppo_types import PPORLBatch, PPORLElement
 from trlx.pipeline import BaseRolloutStore
-
+import torch
 
 def ppo_collate_fn(padding_side: str, pad_token_id: int, elems: Iterable[PPORLElement]):
     if padding_side == "left":
@@ -67,6 +67,22 @@ class PPORolloutStorage(BaseRolloutStore):
 
     def clear_history(self):
         self.history = []
+    
+    def from_json(self, location):
+        assert os.path.exists(location)
+        fpath = os.path.join(location, f"test.json")
+        with open(fpath, "r") as f:
+            history_dict = json.load(f)
+        
+        def dict_to_exp(d):
+            d["query_tensor"] = torch.tensor(d["query_tensor"], dtype=torch.long)
+            d["response_tensor"] = torch.tensor(d["response_tensor"], dtype=torch.long)
+            d["logprobs"] = torch.tensor(d["logprobs"])
+            d["values"] = torch.tensor(d["values"])
+            d["rewards"] = torch.tensor(d["rewards"])
+            return PPORLElement(**d)
+        
+        self.history = [dict_to_exp(d) for d in history_dict]
 
     def export_history(self, location: str, only_text=True):
         assert os.path.exists(location)
