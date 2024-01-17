@@ -42,8 +42,8 @@ default_config = TRLConfig(
         checkpoint_dir="checkpoints/ppo_hh",
     ),
     model=ModelConfig(
-        model_path="mistralai/Mixtral-8x7B-Instruct-v0.1",
-        # model_path="openchat/openchat_3.5",
+        #model_path="mistralai/Mixtral-8x7B-Instruct-v0.1",
+         model_path="openchat/openchat_3.5",
         # model_path="lmsys/vicuna-7b-v1.5",
         num_layers_unfrozen=6,
         # peft_config=LoraConfig(
@@ -53,8 +53,8 @@ default_config = TRLConfig(
         #     lora_dropout=0.1,
         # ),
     ),
-    tokenizer=TokenizerConfig(tokenizer_path="mistralai/Mixtral-8x7B-Instruct-v0.1", truncation_side="left"),
-    # tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
+    # tokenizer=TokenizerConfig(tokenizer_path="mistralai/Mixtral-8x7B-Instruct-v0.1", truncation_side="left"),
+    tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
     # tokenizer=TokenizerConfig(tokenizer_path="lmsys/vicuna-7b-v1.5", truncation_side="left"),
     optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=2e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
     scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=2e-7)),
