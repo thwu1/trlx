@@ -132,7 +132,7 @@ def create_reward_fn():  # noqa:  C901
     print("Reward tokenizer pad token:", reward_tokenizer.pad_token)
     reward_tokenizer.truncation_side = "left"
 
-    directory = snapshot_download("banghua/refine_rm")
+    directory = snapshot_download("berkeley-nest/Starling-RM-7B-alpha")
     for fpath in os.listdir(directory):
         if fpath.endswith(".pt") or fpath.endswith("model.bin"):
             checkpoint = os.path.join(directory, fpath)
