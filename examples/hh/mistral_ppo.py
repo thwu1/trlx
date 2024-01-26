@@ -103,7 +103,7 @@ test_run = True
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt_2", split="train")
+    dataset = load_dataset("ThWu/cleaned_prompt_r_2", split="train")
     dataset = dataset.train_test_split(test_size=0.001, seed=42)
     dataset = dataset.map(from_list_to_openchat)
 
