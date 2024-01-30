@@ -11,7 +11,7 @@ from huggingface_hub import snapshot_download
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tritonclient.utils import np_to_triton_dtype
-from utils import from_openchat_to_llama, from_list_to_openchat, fake_reward, create_reward_fn
+from utils import from_openchat_to_llama, from_list_to_openchat, create_fake_reward, create_reward_fn
 from peft import LoraConfig, TaskType
 
 import trlx
@@ -25,36 +25,29 @@ from trlx.data.default_configs import (
     TRLConfig,
 )
 
-
 default_config = TRLConfig(
     train=TrainConfig(
-        seq_length=2148,
+        seq_length=2048,
         epochs=10000,
         total_steps=20000,
-        batch_size=4,
+        batch_size=2,
         eval_batch_size=4,
-        checkpoint_interval=500,
+        checkpoint_interval=4,
         eval_interval=500,
         save_best=True,
         save_optimizer=False,
         pipeline="PromptPipeline",
         trainer="AcceleratePPOTrainer",
-        checkpoint_dir="checkpoints/ppo_hh",
+        checkpoint_dir="/scratch/banghua/starling_checkpoints",
     ),
     model=ModelConfig(
-        model_path="mistralai/Mixtral-8x7B-Instruct-v0.1",
-        # model_path="openchat/openchat_3.5",
+        # model_path="mistralai/Mistral-7B-Instruct-v0.1",
+        model_path="openchat/openchat_3.5",
         # model_path="lmsys/vicuna-7b-v1.5",
-        num_layers_unfrozen=6,
-        # peft_config=LoraConfig(
-        #     r=8,
-        #     task_type=TaskType.CAUSAL_LM,
-        #     lora_alpha=32,
-        #     lora_dropout=0.1,
-        # ),
+        num_layers_unfrozen=2,
     ),
-    tokenizer=TokenizerConfig(tokenizer_path="mistralai/Mixtral-8x7B-Instruct-v0.1", truncation_side="left"),
-    # tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
+    # tokenizer=TokenizerConfig(tokenizer_path="mistralai/Mistral-7B-Instruct-v0.1", truncation_side="left"),
+    tokenizer=TokenizerConfig(tokenizer_path="openchat/openchat_3.5", truncation_side="left"),
     # tokenizer=TokenizerConfig(tokenizer_path="lmsys/vicuna-7b-v1.5", truncation_side="left"),
     optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=2e-7, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
     scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=10000, eta_min=2e-7)),
@@ -103,13 +96,14 @@ test_run = True
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
-    dataset = load_dataset("ThWu/rlhf_cleaned_prompt_2", split="train")
+    dataset = load_dataset("ThWu/cleaned_prompt_r_2", split="train")
     dataset = dataset.train_test_split(test_size=0.001, seed=42)
     dataset = dataset.map(from_list_to_openchat)
 
     prompts = [{"prompt": x["prompt"]} for x in dataset["train"]]
     eval_prompts = [{"prompt": x["prompt"]} for x in islice(dataset["test"], 100)]
-    reward_fn = fake_reward if test_run else create_reward_fn()
+
+    reward_fn = create_fake_reward if test_run else create_reward_fn
 
     trlx.train(
         prompts=prompts,

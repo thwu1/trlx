@@ -15,6 +15,7 @@ from transformers import AutoModelForCausalLM
 from peft import get_peft_config, get_peft_model
 import gc
 from transformers import BitsAndBytesConfig
+from accelerate.utils import gather_object, broadcast_object_list
 import trlx.utils.logging as logging
 from trlx.data.accelerate_base_datatypes import PromptBatch
 from trlx.data.configs import TRLConfig
@@ -33,7 +34,8 @@ from trlx.trainer import register_trainer
 from trlx.trainer.accelerate_base_trainer import AccelerateRLTrainer
 from trlx.utils import Clock, infinite_dataloader
 from trlx.utils.modeling import RunningMoments, gather_dict, logprobs_of_labels
-
+import deepspeed
+from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 logger = logging.get_logger(__name__)
 
 
@@ -52,6 +54,12 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             kwargs: Additional keyword arguments passed to `AccelerateRLTrainer`
         """
         super().__init__(config, **kwargs)
+        ds_plugin = self.accelerator.state.deepspeed_plugin
+        if ds_plugin is not None and ds_plugin.is_zero3_init_enabled():
+            with ds_plugin.zero3_init_context_manager(enable=False):
+                self.reward_fn = self.reward_fn()
+        else:
+            self.reward_fn = self.reward_fn()
 
         # Setup rollout logging
         if config.train.rollout_logging_dir is not None:
@@ -69,6 +77,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
         rollout_loader: DataLoader = self.store.create_loader(self.config.train.batch_size, shuffle=True)
 
         # Prepare multi-GPU acceleration
+        deepspeed.utils.set_z3_leaf_modules(self.model, [MixtralSparseMoeBlock])
         self.model, self.opt, self.scheduler, rollout_loader = self.accelerator.prepare(self.model, self.opt, self.scheduler, rollout_loader)
 
         self.store.clear_history()  # Clear the rollout store
@@ -112,7 +121,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
         """Get the model"""
         if "mixtral" in config.model.model_path.lower():
             print(f"Detecting model name mixtral in {config.model.model_path}, use Wrapper class MixtralModelWithHydraValueHead")
-            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path, torch_dtype=torch.bfloat16)
+            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path, torch_dtype=torch.bfloat16, attn_implementation="eager")
             return MixtralModelWithHydraValueHead(
                 base_model=base_model,
                 num_layers_unfrozen=config.model.num_layers_unfrozen,
@@ -121,10 +130,10 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             )
         elif "openchat" in config.model.model_path.lower() or "mistral" in config.model.model_path.lower():
             print(f"Detecting model name {config.model.model_path}, use Wrapper class MistralModelWithHydraValueHead")
-            nf4_config = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16
-            )
-            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path, torch_dtype=torch.bfloat16)
+            # nf4_config = BitsAndBytesConfig(
+            #     load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16
+            # )
+            base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path, torch_dtype=torch.bfloat16, attn_implementation="eager")
             # base_model = AutoModelForCausalLM.from_pretrained(config.model.model_path, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2")
             peft_config = self.config.model.peft_config
             if peft_config:
@@ -134,6 +143,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
                 base_model.config.use_cache = False  # required for gradient checkpointing
                 base_model.enable_input_require_grads()  # required for gradient checkpointing
                 base_model.gradient_checkpointing_enable()  # enable gradient checkpointing
+            # print(self.config.model.model_extra_configs)
             return MistralModelWithHydraValueHead(
                 base_model=base_model,
                 num_layers_unfrozen=config.model.num_layers_unfrozen,
@@ -317,20 +327,60 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
         ppo_rl_elements = []
         accumulated_stats = []
 
-        while len(ppo_rl_elements) < num_rollouts:
-            stats = {}
+        prompts = []
+        l = 0
+
+        while l < num_rollouts:
             # Get next batch in prompt dataset
             batch: PromptBatch = next(self.prompt_iterator)
+            l += len(batch["input_ids"])
+            prompts.append(batch)
+
+        prompts_dict = [{self.accelerator.local_process_index: prompts}]
+
+        all_prompts_dict = gather_object(prompts_dict)
+        # save the model
+        if self.accelerator.is_main_process:
+            model_dir = [self.config.train.checkpoint_dir + f"/{uuid.uuid4()}"]
+        else:
+            model_dir = [None]
+        model_dir = broadcast_object_list(model_dir, 0)[0]
+        self.save_lm(model_dir)
+
+        if self.accelerator.is_main_process:
+            assert self.accelerator.local_process_index == 0
+            all_prompts_dict = self.vllm_generate(all_prompts_dict, model_dir)
+
+        self.accelerator.wait_for_everyone()
+        all_prompts_dict = broadcast_object_list(all_prompts_dict, from_process=0)
+
+        def find_batch(prompts_dict, process_index):
+            for i, batch in enumerate(prompts_dict):
+                # print(f"{process_index} in {batch}.keys(): {process_index in batch.keys()}")
+                if f"{process_index}" in batch.keys():
+                    return batch[f"{process_index}"]
+            return None
+
+        # with self.accelerator.split_between_processes(all_prompts_dict) as prompts_dict:
+        #     batches = prompts_dict[0][self.accelerator.local_process_index]
+        batches = find_batch(all_prompts_dict, self.accelerator.local_process_index)
+        assert (
+            batches is not None
+        ), f"batches is None, all_prompts_dict: {all_prompts_dict}, self.accelerator.local_process_index: {self.accelerator.local_process_index}"
+
+        for batch in batches:
+            stats = {}
+            # Get next batch in prompt dataset
+            # batch: PromptBatch = next(self.prompt_iterator)
+            # print(batch)
+            device = self.accelerator.device
 
             rollout_generate_time = time()
-            # print("batch:", batch)
 
-            # Generate samples from the language model (similar to using HuggingFace `generate` method)
-            samples = self.generate(batch["input_ids"], batch["attention_mask"])
+            samples = torch.cat((batch["input_ids"], batch["output_tokens"]), dim=1).to(device)
             stats["time/rollout_generate"] = time() - rollout_generate_time
 
-            prompt_tensors = batch.input_ids
-            device = samples.device
+            prompt_tensors = batch["input_ids"].to(device)
 
             prompt_sizes = torch.tensor([prompt_tensors.shape[1]] * len(prompt_tensors), device=device)
             padded_samples = self.accelerator.pad_across_processes(samples, dim=1, pad_index=self.tokenizer.pad_token_id, pad_first=False)
@@ -338,15 +388,13 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
             gathered_samples = self.accelerator.gather(padded_samples)
             gathered_prompts = self.accelerator.gather(padded_prompts)
             gathered_prompt_sizes = self.accelerator.gather(prompt_sizes)
-            metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
+            # print("batch", batch)
+            # metadata = gather_dict({k: v for k, v in batch.items() if k != "input_ids" and k != "attention_mask"})
 
             if self.accelerator.is_main_process:
                 all_str_samples, all_str_prompts, all_str_outputs = self.decode(
                     gathered_prompts, gathered_samples, gathered_prompt_sizes, append_eos_token=False
                 )
-                # print("all_str_samples:", all_str_samples)
-                # print("all_str_prompts:", all_str_prompts)
-                # print("all_str_outputs:", all_str_outputs)
 
                 rollout_score_time = time()
                 # reward_fn should return list of rewards at each token per sample
@@ -356,7 +404,7 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
                     prompts=all_str_prompts,
                     outputs=all_str_outputs,
                     tokenizer=self.tokenizer,
-                    **metadata,
+                    # **metadata,
                 )
                 all_scores = [
                     torch.tensor(score, dtype=torch.float, device=device).view(
@@ -406,7 +454,6 @@ class AcceleratePPOTrainer(AccelerateRLTrainer):
                 for output in outputs
             ]
             sample_outputs = torch.vstack(outputs).to(device)
-            # print("sample_outputs:", sample_outputs)
 
             if self.config.method.cliprange_reward:
                 scores = torch.clip(scores, -self.config.method.cliprange_reward, self.config.method.cliprange_reward)

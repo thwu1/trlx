@@ -339,6 +339,7 @@ class MixtralModelBranch(transformers.PreTrainedModel):
             self.lm_head = deepcopy(lm_head)
 
         self.gradient_checkpointing = False
+        self._use_flash_attention_2 = False
 
     def forward(
         self,
@@ -539,6 +540,7 @@ class MixtralModelWithHydraValueHead(PreTrainedModelWrapper):
             "position_ids": position_ids,
             "output_hidden_states": True,
             "return_dict": True,
+            "use_cache": False,
         }
 
         outputs = self.base_model(**forward_kwargs)
@@ -571,6 +573,7 @@ class MixtralModelWithHydraValueHead(PreTrainedModelWrapper):
             "position_ids": position_ids,
             "output_hidden_states": True,
             "return_dict": True,
+            "use_cache": False,
         }
         outputs = self.forward(**forward_kwargs)
         forward_kwargs["hidden_states"] = outputs["hidden_states"][-(self.num_layers_unfrozen + 1)]
@@ -836,8 +839,7 @@ class MistralModelWithHydraValueHead(PreTrainedModelWrapper):
         self.num_layers_unfrozen = num_layers_unfrozen
         # print("before creat v head base_model", base_model.eval())
         self.v_head = make_mistral_value_branch(base_model, num_layers_unfrozen)
-        # print("self.peft_type", self.peft_type)
-        # print("self.peft_config", self.peft_config)
+
         if self.num_layers_unfrozen > 0 and not self.peft_type:
             self.frozen_head = MistralModelBranch(base_model, num_layers_unfrozen)
             for param in self.frozen_head.parameters():
@@ -867,6 +869,7 @@ class MistralModelWithHydraValueHead(PreTrainedModelWrapper):
             "attention_mask": attention_mask,
             "position_ids": position_ids,
             # "use_cache": True,
+            "use_cache": False,
             "output_hidden_states": True,
             "return_dict": True,
         }

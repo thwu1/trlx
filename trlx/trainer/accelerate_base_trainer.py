@@ -15,6 +15,9 @@ from ray.air import session
 from rich.console import Console
 from rich.table import Table
 from transformers import AutoTokenizer
+import subprocess
+from vllm import LLM, SamplingParams
+from collections import OrderedDict
 
 import trlx.utils.logging as logging
 from trlx.data.configs import TRLConfig
@@ -261,6 +264,46 @@ class AccelerateRLTrainer(BaseRLTrainer):
 
         with torch.no_grad():
             return self.accelerator.unwrap_model(self.model).generate(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+    
+    def vllm_generate(self, all_prompts_dict, model_dir):
+        # save the inputs
+        with open(model_dir + "/prompt.json", "w") as f:
+            # print("before serialize", all_prompts_dict)
+            json.dump(self.serialize(all_prompts_dict), f)
+        
+        # run vllm_generate.py
+        print("Run vllm_generate.py")
+        command = f"/home/banghua/trlx/trlx/trainer/vllm_generate.sh {model_dir}/prompt.json {model_dir}"
+        my_env = {'SHELL': '/bin/bash', 'COLORTERM': 'truecolor', 'TERM_PROGRAM_VERSION': '1.85.2', 'CONDA_EXE': '/home/banghua/miniconda3/bin/conda', '_CE_M': '', 'PWD': '/home/banghua/trlx', 'LOGNAME': 'banghua', 'CONDA_ROOT': '/home/banghua/miniconda3', 'XDG_SESSION_TYPE': 'tty', 'CONDA_PREFIX': '/home/banghua/miniconda3/envs/trlx', 'VSCODE_GIT_ASKPASS_NODE': '/home/banghua/.vscode-server/bin/8b3775030ed1a69b13e4f4c628c612102e30a681/node', 'MOTD_SHOWN': 'pam', 'HOME': '/home/banghua', 'LANG': 'C.UTF-8', 'LS_COLORS': 'rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=00:su=37;41:sg=30;43:ca=30;41:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.arc=01;31:*.arj=01;31:*.taz=01;31:*.lha=01;31:*.lz4=01;31:*.lzh=01;31:*.lzma=01;31:*.tlz=01;31:*.txz=01;31:*.tzo=01;31:*.t7z=01;31:*.zip=01;31:*.z=01;31:*.dz=01;31:*.gz=01;31:*.lrz=01;31:*.lz=01;31:*.lzo=01;31:*.xz=01;31:*.zst=01;31:*.tzst=01;31:*.bz2=01;31:*.bz=01;31:*.tbz=01;31:*.tbz2=01;31:*.tz=01;31:*.deb=01;31:*.rpm=01;31:*.jar=01;31:*.war=01;31:*.ear=01;31:*.sar=01;31:*.rar=01;31:*.alz=01;31:*.ace=01;31:*.zoo=01;31:*.cpio=01;31:*.7z=01;31:*.rz=01;31:*.cab=01;31:*.wim=01;31:*.swm=01;31:*.dwm=01;31:*.esd=01;31:*.jpg=01;35:*.jpeg=01;35:*.mjpg=01;35:*.mjpeg=01;35:*.gif=01;35:*.bmp=01;35:*.pbm=01;35:*.pgm=01;35:*.ppm=01;35:*.tga=01;35:*.xbm=01;35:*.xpm=01;35:*.tif=01;35:*.tiff=01;35:*.png=01;35:*.svg=01;35:*.svgz=01;35:*.mng=01;35:*.pcx=01;35:*.mov=01;35:*.mpg=01;35:*.mpeg=01;35:*.m2v=01;35:*.mkv=01;35:*.webm=01;35:*.ogm=01;35:*.mp4=01;35:*.m4v=01;35:*.mp4v=01;35:*.vob=01;35:*.qt=01;35:*.nuv=01;35:*.wmv=01;35:*.asf=01;35:*.rm=01;35:*.rmvb=01;35:*.flc=01;35:*.avi=01;35:*.fli=01;35:*.flv=01;35:*.gl=01;35:*.dl=01;35:*.xcf=01;35:*.xwd=01;35:*.yuv=01;35:*.cgm=01;35:*.emf=01;35:*.ogv=01;35:*.ogx=01;35:*.aac=00;36:*.au=00;36:*.flac=00;36:*.m4a=00;36:*.mid=00;36:*.midi=00;36:*.mka=00;36:*.mp3=00;36:*.mpc=00;36:*.ogg=00;36:*.ra=00;36:*.wav=00;36:*.oga=00;36:*.opus=00;36:*.spx=00;36:*.xspf=00;36:', 'CONDA_PROMPT_MODIFIER': '(trlx) ', 'GIT_ASKPASS': '/home/banghua/.vscode-server/bin/8b3775030ed1a69b13e4f4c628c612102e30a681/extensions/git/dist/askpass.sh', 'SSH_CONNECTION': '71.198.112.95 56986 172.27.26.235 22', 'VSCODE_GIT_ASKPASS_EXTRA_ARGS': '', 'LESSCLOSE': '/usr/bin/lesspipe %s %s', 'XDG_SESSION_CLASS': 'user', 'TERM': 'xterm-256color', '_CE_CONDA': '', 'LESSOPEN': '| /usr/bin/lesspipe %s', 'USER': 'banghua', 'VSCODE_GIT_IPC_HANDLE': '/run/user/243000177/vscode-git-ab88921423.sock', 'CONDA_SHLVL': '2', 'SHLVL': '1', 'XDG_SESSION_ID': '1215', 'CONDA_PYTHON_EXE': '/home/banghua/miniconda3/bin/python', 'XDG_RUNTIME_DIR': '/run/user/243000177', 'PS1': '\\[\x1b]633;A\x07\\](trlx) (base) \\[\\e]0;\\u@\\h: \\w\\a\\]${debian_chroot:+($debian_chroot)}\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ \\[\x1b]633;B\x07\\]', 'SSH_CLIENT': '71.198.112.95 56986 22', 'CONDA_DEFAULT_ENV': 'trlx', 'VSCODE_GIT_ASKPASS_MAIN': '/home/banghua/.vscode-server/bin/8b3775030ed1a69b13e4f4c628c612102e30a681/extensions/git/dist/askpass-main.js', 'BROWSER': '/home/banghua/.vscode-server/bin/8b3775030ed1a69b13e4f4c628c612102e30a681/bin/helpers/browser.sh', 'PATH': '/home/banghua/.vscode-server/bin/8b3775030ed1a69b13e4f4c628c612102e30a681/bin/remote-cli:/home/banghua/miniconda3/envs/trlx/bin:/home/banghua/miniconda3/condabin:/opt/hpcx/sharp/bin:/opt/hpcx/clusterkit/bin:/opt/hpcx/hcoll/bin:/opt/hpcx/ucc/bin:/opt/hpcx/ucx/bin:/opt/hpcx/ompi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/banghua/miniconda3/bin:/home/banghua/.vscode-server/bin/8b3775030ed1a69b13e4f4c628c612102e30a681/bin/remote-cli:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/243000177/bus', 'CONDA_PREFIX_1': '/home/banghua/miniconda3', 'CONDA_PREFIX_2': '/home/banghua/miniconda3/envs/trlx', 'TERM_PROGRAM': 'vscode', 'VSCODE_IPC_HOOK_CLI': '/run/user/243000177/vscode-ipc-4b3a9036-af7c-41f8-817b-0d8bd6184641.sock', '_': '/home/banghua/miniconda3/envs/trlx/bin/python'}
+        proc = subprocess.Popen(command, env=my_env, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = proc.communicate()
+
+        print("Standard Output:\n", stdout.decode())
+        print("Standard Error:\n", stderr.decode())
+
+        outputs_dict = json.load(open(model_dir + "/output.json"))
+        return self.deserialize(outputs_dict)
+    
+    def serialize(self, all_prompts_dict):
+        """all_prompts_dict: [{local_process_idx: batch},...]
+        batch: [{input_ids: torch.LongTensor, attention_mask: torch.LongTensor},...]
+        """
+        def _serialize(batch):
+            batch = [{k: v.tolist() for k, v in mini_batch.items()} for mini_batch in batch]
+            return batch
+        for i, batch in enumerate(all_prompts_dict):
+            for k, v in batch.items():
+                all_prompts_dict[i][k] = _serialize(v)
+        return all_prompts_dict
+
+    def deserialize(self,all_prompts_dict):
+        def _deserialize(batch):
+            batch = [{k: torch.tensor(v, dtype=torch.long) for k, v in mini_batch.items()} for mini_batch in batch]
+            return batch
+        for i, batch in enumerate(all_prompts_dict):
+            for k, v in batch.items():
+                all_prompts_dict[i][k] = _deserialize(v)
+        return all_prompts_dict
 
     def generate_eval(self, input_ids, attention_mask=None, **kwargs):
         """Generate samples for evaluation using `self.generate_kwargs`"""
@@ -297,6 +340,40 @@ class AccelerateRLTrainer(BaseRLTrainer):
 
         if self.accelerator.is_main_process:
             self.tokenizer.save_pretrained(directory)
+    
+    def save_lm(self, directory: Optional[str] = None, **kwargs):
+        if directory is None:
+            directory = os.path.join(self.config.train.checkpoint_dir, "lm_model")
+
+        def filter_lm_only(state_dict):
+            if state_dict is None:
+                return None
+            filtered_state_dict = OrderedDict((k.replace("base_model.",""),v) for k,v in state_dict.items() if k.startswith("base_model"))
+            del state_dict
+            return filtered_state_dict
+        
+        # print(self.accelerator.get_state_dict(self.model))
+
+        self.accelerator.wait_for_everyone()
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        unwrapped_model.base_model.do_sample = True
+        unwrapped_model.base_model.save_pretrained(
+            directory,
+            save_function=self.accelerator.save,
+            is_main_process=self.accelerator.is_main_process,
+            state_dict=filter_lm_only(self.accelerator.get_state_dict(self.model)),
+            **kwargs,
+        )
+
+        if self.accelerator.is_main_process:
+            self.tokenizer.save_pretrained(directory)
+            print(f"Saved model to {directory}")
+        
+            # find the file model.safetensors, if exists, delete it
+            # This is a hack to work around saving issue with ZeRO-3
+            model_file = os.path.join(directory, "model.safetensors")
+            if os.path.exists(model_file):
+                os.remove(model_file)
 
     def save(self, directory: Optional[str] = None, **kwargs):
         """Creates a checkpoint for the optimizer, scheduler and the model"""
@@ -542,6 +619,9 @@ class AccelerateRLTrainer(BaseRLTrainer):
         """
         Samples batches from `self.store`, updates model and periodically evaluates it on `self.eval_dataloader`
         """
+        # directory = os.path.join(self.config.train.checkpoint_dir, "checkpoint_test")
+        # self.save_lm(directory)
+
         logger.info("Starting training")
 
         self.prepare_learning()
@@ -558,8 +638,9 @@ class AccelerateRLTrainer(BaseRLTrainer):
                         state = json.load(f)
                         self.iter_count = state["iter_count"]
         else:
-            results = self.evaluate()
-            self.accelerator.log(results, step=self.iter_count)
+            # results = self.evaluate()
+            # self.accelerator.log(results, step=self.iter_count)
+            pass
 
         tbar = logging.tqdm(
             initial=self.iter_count,
@@ -625,43 +706,44 @@ class AccelerateRLTrainer(BaseRLTrainer):
 
                         pretrained_directory = os.path.join(directory, "hf_model")
                         logger.info(f"Saving pretrained model into {pretrained_directory}")
-                        self.save_pretrained(pretrained_directory)
+                        # self.save_pretrained(pretrained_directory)
+                        # self.save_lm(pretrained_directory)
 
                     stats["time/forward"] = forward_time
                     stats["time/backward"] = backward_time
                     for group_number, lr in enumerate(self.scheduler.get_last_lr()):
                         stats[f"learning_rate_group_{group_number}"] = lr
 
-                    if self.iter_count % self.config.train.eval_interval == 0 or self.iter_count >= self.total_steps:
-                        results = self.evaluate()
-                        stats.update(results)
-                        if ray.is_initialized():
-                            session.report(filter_non_scalars(stats), checkpoint=checkpoint)
+                    # if self.iter_count % self.config.train.eval_interval == 0 or self.iter_count >= self.total_steps:
+                    #     results = self.evaluate()
+                    #     stats.update(results)
+                    #     if ray.is_initialized():
+                    #         session.report(filter_non_scalars(stats), checkpoint=checkpoint)
 
-                        # always save checkpoint with the greatest mean reward
-                        if self.config.train.save_best:
-                            if stats.get("reward/mean", -float("inf")) > best_reward:
-                                best_reward = stats.get("reward/mean")
-                                do_save = True
-                            # in case ILQL reports reward estimate as one of its metrics
-                            elif stats.get("metrics/reward", -float("inf")) > best_reward:
-                                best_reward = stats.get("metrics/reward")
-                                do_save = True
-                            else:
-                                do_save = False
-                            do_save = torch.tensor(do_save, device=self.accelerator.device)
-                            if torch.distributed.is_initialized():
-                                torch.distributed.all_reduce(do_save, torch.distributed.ReduceOp.MAX)
-                            if do_save:
-                                directory = os.path.join(self.config.train.checkpoint_dir, "best_checkpoint")
+                    #     # always save checkpoint with the greatest mean reward
+                    #     if self.config.train.save_best:
+                    #         if stats.get("reward/mean", -float("inf")) > best_reward:
+                    #             best_reward = stats.get("reward/mean")
+                    #             do_save = True
+                    #         # in case ILQL reports reward estimate as one of its metrics
+                    #         elif stats.get("metrics/reward", -float("inf")) > best_reward:
+                    #             best_reward = stats.get("metrics/reward")
+                    #             do_save = True
+                    #         else:
+                    #             do_save = False
+                    #         do_save = torch.tensor(do_save, device=self.accelerator.device)
+                    #         if torch.distributed.is_initialized():
+                    #             torch.distributed.all_reduce(do_save, torch.distributed.ReduceOp.MAX)
+                    #         if do_save:
+                    #             directory = os.path.join(self.config.train.checkpoint_dir, "best_checkpoint")
 
-                                if self.config.train.save_optimizer:
-                                    logger.info(f"Saving intermediate optimizer & model checkpoint into {directory}")
-                                    self.save(directory)
+                    #             if self.config.train.save_optimizer:
+                    #                 logger.info(f"Saving intermediate optimizer & model checkpoint into {directory}")
+                    #                 self.save(directory)
 
-                                pretrained_directory = os.path.join(directory, "hf_model")
-                                logger.info(f"Saving pretrained model into {pretrained_directory}")
-                                self.save_pretrained(pretrained_directory)
+                    #             pretrained_directory = os.path.join(directory, "hf_model")
+                    #             logger.info(f"Saving pretrained model into {pretrained_directory}")
+                    #             self.save_pretrained(pretrained_directory)
 
                     desc = " | ".join(f"{k}: {v:.2f}" for k, v in stats.items() if k.startswith("loss"))
                     tbar.set_description(f"[{desc}]")

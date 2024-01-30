@@ -4,6 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import math
 from torch import nn
 import os
+import gc
 from huggingface_hub import snapshot_download
 
 
@@ -28,6 +29,7 @@ def from_list_to_openchat(sample: Dict[str, List[str]]) -> Dict[str, str]:
             str += "GPT4 Correct Assistant: " + content + "<|end_of_turn|> "
     str += "GPT4 Correct Assistant:"
     return {"prompt": str}
+
 
 def from_list_to_mixtral(sample: Dict[str, List[str]]) -> Dict[str, str]:
     str = ""
@@ -63,9 +65,10 @@ def to_list(str: str, human_template: str, assistant_template: str) -> List[Dict
                     output_ls.append({"assistant": new_content})
     return output_ls
 
-
-def fake_reward(samples, *args, **kwargs):
-    return torch.tensor([0.0] * len(samples))
+def create_fake_reward():
+    def fake_reward(samples, *args, **kwargs):
+        return torch.tensor([0.0] * len(samples))
+    return fake_reward
 
 
 def create_reward_fn():  # noqa:  C901
@@ -73,7 +76,7 @@ def create_reward_fn():  # noqa:  C901
         def __init__(self, model_path, eos_token_id, alpha):
             super().__init__()
             if "mistral" in model_path or "Llama" in model_path:
-                model = AutoModelForCausalLM.from_pretrained(model_path)
+                model = AutoModelForCausalLM.from_pretrained(model_path,  token="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")
                 self.transformer = model.model
             else:
                 model = AutoModelForCausalLM.from_pretrained(model_path)
@@ -85,7 +88,7 @@ def create_reward_fn():  # noqa:  C901
             # self.transformer = model.model
             self.alpha = alpha
             self.v_head = nn.Linear(self.config.n_embd, 1, bias=False)
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, token="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")
             print("Reward tokenizer eos token:", self.tokenizer.eos_token)
             # self.tokenizer.eos_token_id = eos_token_id
             self.tokenizer.pad_token = self.tokenizer.unk_token
@@ -126,13 +129,13 @@ def create_reward_fn():  # noqa:  C901
                 scores.append(rewards[i, c_ind - 1])
             return scores
 
-    reward_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+    reward_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf", token="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")
     reward_model = GPTRewardModel("meta-llama/Llama-2-7b-chat-hf", reward_tokenizer.eos_token_id, 0.5)
     reward_tokenizer = reward_model.tokenizer
     print("Reward tokenizer pad token:", reward_tokenizer.pad_token)
     reward_tokenizer.truncation_side = "left"
 
-    directory = snapshot_download("banghua/refine_rm")
+    directory = snapshot_download("berkeley-nest/Starling-RM-7B-alpha")
     for fpath in os.listdir(directory):
         if fpath.endswith(".pt") or fpath.endswith("model.bin"):
             checkpoint = os.path.join(directory, fpath)
@@ -142,11 +145,14 @@ def create_reward_fn():  # noqa:  C901
     reward_model.eval()
     reward_model.requires_grad_(False)
     if os.environ.get("LOCAL_RANK", "0") == "0":
-        reward_device = torch.cuda.device_count() - 1
+        reward_device = 5
         reward_model = reward_model.to(reward_device)
         reward_batch_size = 4
     else:
         del reward_model
+        gc.collect()
+        torch.cuda.empty_cache()
+        gc.collect()
 
     def get_reward(samples):
         """samples: List[str]"""

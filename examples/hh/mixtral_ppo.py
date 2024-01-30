@@ -28,10 +28,10 @@ from trlx.data.default_configs import (
 
 default_config = TRLConfig(
     train=TrainConfig(
-        seq_length=2148,
+        seq_length=2048,
         epochs=10000,
         total_steps=20000,
-        batch_size=4,
+        batch_size=1,
         eval_batch_size=4,
         checkpoint_interval=500,
         eval_interval=500,
@@ -39,7 +39,7 @@ default_config = TRLConfig(
         save_optimizer=False,
         pipeline="PromptPipeline",
         trainer="AcceleratePPOTrainer",
-        checkpoint_dir="checkpoints/ppo_hh",
+        checkpoint_dir="/scratch/banghua/trlx_mixtral_checkpoints",
     ),
     model=ModelConfig(
         model_path="mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -95,7 +95,7 @@ default_config = TRLConfig(
 #     t = client_util.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
 #     t.set_data_from_numpy(input)
 #     return t
-test_run = False
+test_run = True
 
 def main(hparams={}):
     config = TRLConfig.update(default_config, hparams)
